@@ -476,19 +476,26 @@ class AutoGraph(
         Returns:
             Raw extracted graph data.
         """
+        logger.debug("stage=one_stage_start mode=%s", self.extraction_mode)
 
         if len(text) <= self.chunk_size:
+            logger.debug("stage=one_stage_single_invoke")
             graph = self.data_extractor.invoke({"source_text": text})
             graph_list = [graph]
         else:
             chunks = self.text_splitter.split_text(text)
+            logger.debug("stage=one_stage_split num_chunks=%d", len(chunks))
             inputs = [{"source_text": chunk} for chunk in chunks]
+            logger.debug("stage=one_stage_batch_start max_concurrency=%d", self.max_workers)
             graph_list = self.data_extractor.batch(
                 inputs, config={"max_concurrency": self.max_workers}
             )
+            logger.debug("stage=one_stage_batch_complete graphs=%d", len(graph_list))
 
-        # Merge multiple graphs
-        return self.merge_batch_data(graph_list)
+        logger.debug("stage=one_stage_merge_start")
+        result = self.merge_batch_data(graph_list)
+        logger.debug("stage=one_stage_merge_complete nodes=%d edges=%d", len(result.nodes), len(result.edges))
+        return result
 
     def _extract_data_by_two_stage(
         self, text: str
@@ -508,17 +515,26 @@ class AutoGraph(
         Returns:
             Extracted and validated graph.
         """
+        logger.debug("stage=two_stage_start mode=%s", self.extraction_mode)
+
         # 1. Prepare chunks
         if len(text) <= self.chunk_size:
             chunks = [text]
         else:
             chunks = self.text_splitter.split_text(text)
+        logger.debug("stage=two_stage_chunks num_chunks=%d", len(chunks))
 
         # 2. Batch Extract Nodes (returns List[NodeListSchema])
+        logger.debug("stage=two_stage_node_extraction_start")
         chunk_node_lists = self._extract_nodes_batch(chunks)
+        total_nodes = sum(len(nl.items) for nl in chunk_node_lists)
+        logger.debug("stage=two_stage_node_extraction_complete chunks=%d total_nodes=%d", len(chunk_node_lists), total_nodes)
 
         # 3. Batch Extract Edges (Context-aware, returns List[EdgeListSchema])
+        logger.debug("stage=two_stage_edge_extraction_start")
         chunk_edge_lists = self._extract_edges_batch(chunks, chunk_node_lists)
+        total_edges = sum(len(el.items) for el in chunk_edge_lists)
+        logger.debug("stage=two_stage_edge_extraction_complete chunks=%d total_edges=%d", len(chunk_edge_lists), total_edges)
 
         # 4. Construct Partial Graphs (Tuple format for merge optimization)
         partial_graphs = (
@@ -527,7 +543,10 @@ class AutoGraph(
         )
 
         # 5. Global Merge (passes tuples to merge_batch_data)
-        return self.merge_batch_data(partial_graphs)
+        logger.debug("stage=two_stage_merge_start")
+        result = self.merge_batch_data(partial_graphs)
+        logger.debug("stage=two_stage_merge_complete nodes=%d edges=%d", len(result.nodes), len(result.edges))
+        return result
 
     def _extract_nodes_batch(
         self, chunks: List[str]
@@ -635,6 +654,8 @@ class AutoGraph(
         Returns:
             Merged graph.
         """
+        logger.debug("stage=merge_batch_start input_type=%s", "tuple" if not isinstance(data_list_or_tuple[0], self.graph_schema) else "list")
+
         if isinstance(data_list_or_tuple[0], self.graph_schema):
             all_nodes, all_edges = [], []
 
@@ -659,8 +680,10 @@ class AutoGraph(
                 all_nodes.extend(node_list)
                 all_edges.extend(edge_list)
 
+        logger.debug("stage=merge_batch_raw total_nodes=%d total_edges=%d", len(all_nodes), len(all_edges))
         merged_nodes = self.node_merger.merge(all_nodes) if all_nodes else []
         merged_edges = self.edge_merger.merge(all_edges) if all_edges else []
+        logger.debug("stage=merge_batch_complete merged_nodes=%d merged_edges=%d deduped_nodes=%d deduped_edges=%d", len(merged_nodes), len(merged_edges), len(all_nodes) - len(merged_nodes), len(all_edges) - len(merged_edges))
         return self.graph_schema(nodes=merged_nodes, edges=merged_edges)
 
     # ==================== Indexing & Search & Chat ====================

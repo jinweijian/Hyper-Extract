@@ -92,6 +92,4 @@ def set_log_level(level: str) -> None:
     logging.getLogger().setLevel(level_value)
 
 
-configure_logging(level="WARNING")
-
 __all__ = ["get_logger", "configure_logging", "set_log_level"]

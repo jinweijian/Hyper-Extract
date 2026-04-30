@@ -6,8 +6,10 @@ from rich.table import Table
 from rich.text import Text
 
 from ..config import ConfigManager
+from hyperextract.utils.logging import get_logger
 import typer
 
+logger = get_logger("he.config")
 console = Console()
 
 app = typer.Typer(
@@ -133,6 +135,7 @@ def show(
     show_all: bool = typer.Option(False, "--show", help="Show all configuration"),
 ):
     """Show current configuration."""
+    logger.info("command=config-show")
     _show_config()
 
 
@@ -160,6 +163,7 @@ def llm(
     unset: bool = typer.Option(False, "--unset", help="Unset LLM configuration"),
 ):
     """Configure LLM settings."""
+    logger.info("command=config-llm show=%s unset=%s", show, unset)
     config = ConfigManager()
 
     if show:
@@ -214,6 +218,7 @@ def embedder(
     unset: bool = typer.Option(False, "--unset", help="Unset Embedder configuration"),
 ):
     """Configure Embedder settings."""
+    logger.info("command=config-embedder show=%s unset=%s", show, unset)
     config = ConfigManager()
 
     if show:
@@ -258,6 +263,7 @@ def init(
     ),
 ):
     """Initialize configuration interactively."""
+    logger.info("command=config-init api_key_provided=%s", api_key is not None)
     config = ConfigManager()
 
     if api_key:

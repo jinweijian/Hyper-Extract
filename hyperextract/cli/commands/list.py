@@ -7,7 +7,9 @@ from rich.text import Text
 import typer
 
 from hyperextract.utils.template_engine import Gallery
+from hyperextract.utils.logging import get_logger
 
+logger = get_logger("he.list")
 console = Console()
 
 app = typer.Typer(
@@ -40,6 +42,7 @@ def template(
     ),
 ):
     """List all available templates with detailed information."""
+    logger.info("command=list-template query=%s autotype=%s lang=%s", query, autotype, language)
     target_lang = language if language else "en"
 
     results = Gallery.list(
@@ -113,6 +116,7 @@ def method(
     ),
 ):
     """List all available extraction methods with detailed information."""
+    logger.info("command=list-method query=%s", query)
     from hyperextract.methods import list_methods
 
     items = list_methods()

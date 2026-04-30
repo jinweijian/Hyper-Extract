@@ -10,6 +10,10 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from hyperextract.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -243,19 +247,60 @@ class BaseAutoType(ABC, Generic[T]):
 
     def _extract_data(self, text: str) -> T:
         """Internal: Unified extraction logic (Chunking -> LLM -> Merge)."""
+        logger.debug("stage=extract_start input_chars=%d chunk_size=%d", len(text), self.chunk_size)
 
         if len(text) <= self.chunk_size:
+            logger.debug("stage=extract_single_chunk chunk_text_preview=%s", text[:200])
             extracted_data = self.data_extractor.invoke({"source_text": text})
+            logger.debug(
+                "stage=extract_single_chunk_result chunk=0 result_summary=%s",
+                self._summarize_extracted(extracted_data),
+            )
             extracted_data_list = [extracted_data]
         else:
             chunks = self.text_splitter.split_text(text)
+            logger.debug("stage=text_split num_chunks=%d", len(chunks))
+            for i, chunk in enumerate(chunks):
+                logger.debug(
+                    "stage=chunk_before_llm chunk_index=%d chunk_chars=%d chunk_text_preview=%s",
+                    i, len(chunk), chunk[:200],
+                )
             inputs = [{"source_text": chunk} for chunk in chunks]
+            logger.debug("stage=llm_batch_start max_concurrency=%d num_inputs=%d", self.max_workers, len(inputs))
             extracted_data_list = self.data_extractor.batch(
                 inputs, config={"max_concurrency": self.max_workers}
             )
+            logger.debug("stage=llm_batch_complete results=%d", len(extracted_data_list))
+            for i, result in enumerate(extracted_data_list):
+                logger.debug(
+                    "stage=chunk_llm_result chunk_index=%d result_summary=%s",
+                    i, self._summarize_extracted(result),
+                )
 
+        logger.debug("stage=merge_start num_items=%d", len(extracted_data_list))
         merged_data = self.merge_batch_data(extracted_data_list)
+        logger.debug("stage=extract_complete merged_summary=%s", self._summarize_extracted(merged_data))
         return merged_data
+
+    def _summarize_extracted(self, data: T) -> str:
+        """Return a concise summary of extracted data for debug logging."""
+        try:
+            dump = data.model_dump()
+            # Count entities and relations for graph-type schemas
+            entities = len(dump.get("entities", []))
+            relations = len(dump.get("relations", []))
+            if entities or relations:
+                return f"entities={entities} relations={relations}"
+            # Generic fallback: list top-level keys with their lengths
+            parts = []
+            for key, val in dump.items():
+                if isinstance(val, (list, tuple)):
+                    parts.append(f"{key}={len(val)}")
+                elif isinstance(val, str):
+                    parts.append(f"{key}={val[:50]!r}")
+            return ", ".join(parts) if parts else str(dump)[:100]
+        except Exception:
+            return repr(data)[:100]
 
     def parse(self, text: str) -> "BaseAutoType[T]":
         """
@@ -292,10 +337,13 @@ class BaseAutoType(ABC, Generic[T]):
         Returns:
             Self (the current instance).
         """
+        logger.debug("stage=feed_text_start input_chars=%d", len(text))
         extracted_data = self._extract_data(text)
+        logger.debug("stage=extract_done")
 
         # Use UPDATE hook instead of manual merge+set
         self._update_data_state(extracted_data)
+        logger.debug("stage=data_merged")
 
         self.metadata["updated_at"] = datetime.now()
 
