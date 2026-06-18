@@ -45,6 +45,7 @@ Hyper-Extract is an intelligent, LLM-powered knowledge extraction and evolution 
 | 🧠 **10+ Extraction Engines** | GraphRAG, LightRAG, Hyper-RAG, KG-Gen, and more — ready to use |
 | 📝 **80+ YAML Templates** | Zero-code extraction across Finance, Legal, Medical, TCM, Industry, and General domains |
 | 🔄 **Incremental Evolution** | Feed new documents anytime to expand and refine your knowledge base |
+| 📤 **Obsidian Export** | Turn any extracted graph into an Obsidian vault — Markdown notes linked by `[[wikilinks]]` |
 
 ## 🎯 What Can You Do With It?
 
@@ -122,6 +123,9 @@ he search ./output/ "What are Tesla's major achievements?"
 
 # Visualize
 he show ./output/
+
+# Export to an Obsidian vault (Markdown notes + [[wikilinks]])
+he export ./output/ -o ./vault/
 ```
 
 <details>

@@ -136,6 +136,7 @@ def main(
                     ("he talk <ka_path> [-i]", "Chat with KA"),
                     ("he search <ka_path> <query>", "Semantic search"),
                     ("he show <ka_path>", "Visualize KA"),
+                    ("he export <ka_path> -o <vault>", "Export to Obsidian vault"),
                 ],
             ),
         ]
@@ -437,6 +438,88 @@ def show(ka_path: str = typer.Argument(..., help="Knowledge Abstract directory")
         f'[dim]  he search {ka_path} "keyword"  # Search specific content[/dim]'
     )
     console.print(f"[dim]  he talk {ka_path} -i           # Interactive chat[/dim]")
+
+
+@app.command(name="export")
+def export(
+    ka_path: str = typer.Argument(..., help="Knowledge Abstract directory"),
+    output: str = typer.Option(..., "--output", "-o", help="Output vault directory"),
+    fmt: str = typer.Option(
+        "obsidian", "--format", "-F", help="Export format (obsidian)"
+    ),
+    name: Optional[str] = typer.Option(
+        None, "--name", help="Vault name used for the index note"
+    ),
+    no_index: bool = typer.Option(
+        False, "--no-index", help="Skip writing the index/map-of-content note"
+    ),
+    force: bool = typer.Option(
+        False, "--force", "-f", help="Write into an existing, non-empty directory"
+    ),
+):
+    """Export a Knowledge Abstract to an Obsidian vault (Markdown + wikilinks)."""
+    logger.info("command=export ka_path=%s output=%s format=%s", ka_path, output, fmt)
+
+    if fmt != "obsidian":
+        console.print(
+            f"[red]Error:[/red] Unsupported format '{fmt}'. Supported: obsidian."
+        )
+        raise typer.Exit(1)
+
+    path = validate_ka_with_data(ka_path)
+    template, lang = get_template_from_ka(path)
+
+    output_path = Path(output)
+    if output_path.exists() and any(output_path.iterdir()) and not force:
+        console.print(
+            "[red]Error:[/red] Output directory already exists and is not empty. "
+            "Use --force to write into it."
+        )
+        raise typer.Exit(1)
+
+    console.print(f"[blue]Knowledge Abstract:[/blue] {ka_path}")
+    console.print(f"[blue]Template:[/blue] {template}")
+    console.print(f"[blue]Output vault:[/blue] {output}")
+    console.print()
+
+    validate_config()
+
+    vault_name = name or output_path.name or "Knowledge Vault"
+
+    with console.status("[bold blue]Loading Knowledge Abstract..."):
+        try:
+            ka = Template.create(template, lang)
+            ka.load(path)
+        except Exception as e:
+            console.print(f"[red]Error loading Knowledge Abstract:[/red] {e}")
+            raise typer.Exit(1)
+
+    if not hasattr(ka, "export_obsidian"):
+        console.print(
+            "[red]Error:[/red] Obsidian export is only supported for graph-type "
+            "Knowledge Abstracts (graph, hypergraph, temporal/spatial graphs)."
+        )
+        raise typer.Exit(1)
+
+    with console.status("[bold blue]Exporting to Obsidian vault..."):
+        try:
+            ka.export_obsidian(
+                output_path,
+                vault_name=vault_name,
+                include_index=not no_index,
+                overwrite=force,
+            )
+        except Exception as e:
+            console.print(f"[red]Error during export:[/red] {e}")
+            raise typer.Exit(1)
+
+    note_count = len(list(output_path.glob("*.md")))
+    console.print()
+    console.print(
+        f"[bold green]Success![/bold green] Exported {note_count} notes to {output_path}"
+    )
+    console.print()
+    console.print("[dim]Open the folder as a vault in Obsidian to explore it.[/dim]")
 
 
 @app.command(name="info")

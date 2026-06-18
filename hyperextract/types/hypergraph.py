@@ -933,3 +933,55 @@ class AutoHypergraph(
             on_search=search_callback,
             on_chat=chat_callback,
         )
+
+    # ==================== Obsidian Export ====================
+
+    def export_obsidian(
+        self,
+        folder_path: str | Path,
+        *,
+        node_label_extractor: Callable[[NodeSchema], str] = None,
+        edge_label_extractor: Callable[[EdgeSchema], str] = None,
+        vault_name: str = "Knowledge Vault",
+        include_index: bool = True,
+        overwrite: bool = False,
+    ) -> Path:
+        """Export the hypergraph as an Obsidian vault.
+
+        Writes one Markdown note per node (fields stored as YAML front-matter).
+        Each N-ary hyperedge is rendered under its first incident node, linking
+        out to the remaining members via ``[[wikilinks]]``, so the relationship
+        is browsable in Obsidian's graph view.
+
+        Args:
+            folder_path: Destination vault directory.
+            node_label_extractor: Optional node -> display title. Defaults to the
+                one from ``__init__``, then common fields, then the node id.
+            edge_label_extractor: Optional edge -> relationship label. Defaults to
+                the one from ``__init__``, then common fields, then "related to".
+            vault_name: Title used for the generated index note.
+            include_index: Whether to write an index/map-of-content note.
+            overwrite: Allow writing into an existing, non-empty directory.
+
+        Returns:
+            The vault directory :class:`~pathlib.Path`.
+        """
+        from hyperextract.utils.obsidian import export_to_obsidian
+
+        if node_label_extractor is None:
+            node_label_extractor = self._node_label_extractor
+        if edge_label_extractor is None:
+            edge_label_extractor = self._edge_label_extractor
+
+        return export_to_obsidian(
+            nodes=self.nodes,
+            edges=self.edges,
+            node_id_extractor=self.node_key_extractor,
+            incident_nodes_extractor=self.nodes_in_edge_extractor,
+            folder_path=folder_path,
+            node_label_extractor=node_label_extractor,
+            edge_label_extractor=edge_label_extractor,
+            vault_name=vault_name,
+            include_index=include_index,
+            overwrite=overwrite,
+        )

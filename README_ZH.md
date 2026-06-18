@@ -45,6 +45,7 @@ Hyper-Extract 是一个智能的、由大语言模型（LLM）驱动的知识提
 | 🧠 **10+ 提取引擎** | GraphRAG、LightRAG、Hyper-RAG、KG-Gen 等开箱即用 |
 | 📝 **80+ YAML 模板** | 零代码提取，覆盖金融、法律、医疗、中医、工业、通用 6 大领域 |
 | 🔄 **增量演进** | 随时喂入新文档，自动扩展和精炼知识库 |
+| 📤 **Obsidian 导出** | 将提取的图谱导出为 Obsidian 知识库——以 `[[双向链接]]` 关联的 Markdown 笔记 |
 
 ## 🎯 它能做什么？
 
@@ -122,6 +123,9 @@ he search ./output/ "苏轼有哪些重要的作品？"
 
 # 可视化
 he show ./output/
+
+# 导出为 Obsidian 知识库（Markdown 笔记 + [[双向链接]]）
+he export ./output/ -o ./vault/
 ```
 
 <details>
