@@ -50,12 +50,12 @@ PROVIDER_PRESETS: Dict[str, Dict[str, str | None]] = {
     # OpenAI-compatible embedder.
     "anthropic": {
         "base_url": "",
-        "default_llm": "claude-sonnet-4-6",
+        "default_llm": "claude-opus-4-8",
         "default_embedder": None,
     },
     "claude": {
         "base_url": "",
-        "default_llm": "claude-sonnet-4-6",
+        "default_llm": "claude-opus-4-8",
         "default_embedder": None,
     },
 }

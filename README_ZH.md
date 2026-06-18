@@ -98,7 +98,7 @@ Hyper-Extract 依赖大语言模型的结构化输出能力（`json_schema` 或 
 | 平台 | 已验证模型 |
 |----------|-----------------|
 | **OpenAI** | gpt-4o, gpt-4o-mini, gpt-5 |
-| **Anthropic** | claude-sonnet-4-6, claude-opus-4-1, claude-haiku-4-5 |
+| **Anthropic** | claude-opus-4-8, claude-sonnet-4-6, claude-haiku-4-5 |
 | **阿里云百炼** | qwen-plus, qwen-turbo, deepseek-r1 |
 | **本地 vLLM** | Qwen3.5-9B (GPTQ-Marlin) |
 
