@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/yifanfeng97-hyper-extract-badge.png)](https://mseep.ai/app/yifanfeng97-hyper-extract)
+
 <div align="center">
 
 <a href="https://yifanfeng97.github.io/Hyper-Extract/latest/">
