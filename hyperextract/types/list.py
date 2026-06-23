@@ -476,8 +476,12 @@ class AutoList(BaseAutoType[AutoListSchema[ItemSchema]], Generic[ItemSchema]):
             # Create new instance with merged items
             new_instance = self._create_empty_instance()
             new_instance._data.items = self.items + other.items
-            new_instance.metadata["created_at"] = self.metadata.get("created_at")
-            new_instance.metadata["updated_at"] = self.metadata.get("updated_at")
+            # Keep the earliest creation time and mark the merge as just updated,
+            # consistent with the List + AutoModel case below and BaseAutoType.
+            new_instance.metadata["created_at"] = min(
+                self.metadata["created_at"], other.metadata["created_at"]
+            )
+            new_instance.metadata["updated_at"] = datetime.now()
             return new_instance
 
         # Case 2: AutoList + AutoModel → AutoList (append model)

@@ -1,5 +1,7 @@
 """Unit tests for AutoList iteration and membership."""
 
+from datetime import datetime, timedelta
+
 import pytest
 from pydantic import BaseModel, Field
 from typing import Optional
@@ -190,6 +192,37 @@ class TestAutoListOperators:
         result = list1 + list2 + list3
 
         assert len(result) == 3
+
+    def test_add_merges_metadata(self, llm_client, embedder):
+        """List + List keeps the earliest created_at and a fresh updated_at."""
+        list1 = AutoList(
+            item_schema=PersonItemSchema,
+            llm_client=llm_client,
+            embedder=embedder,
+        )
+        list2 = AutoList(
+            item_schema=PersonItemSchema,
+            llm_client=llm_client,
+            embedder=embedder,
+        )
+        list1.append(PersonItemSchema(name="John"))
+        list2.append(PersonItemSchema(name="Jane"))
+
+        # list2 is the older list; both carry a stale updated_at. The left
+        # operand (list1) is the newer one, so a fix that merely copies self's
+        # timestamps would pick the wrong created_at and a stale updated_at.
+        older = datetime.now() - timedelta(days=2)
+        newer = datetime.now() - timedelta(days=1)
+        list1.metadata["created_at"] = newer
+        list2.metadata["created_at"] = older
+        list1.metadata["updated_at"] = older
+        list2.metadata["updated_at"] = older
+
+        before = datetime.now()
+        result = list1 + list2
+
+        assert result.metadata["created_at"] == older
+        assert result.metadata["updated_at"] >= before
 
     def test_add_with_different_schema_raises(self, llm_client, embedder):
         """Test that adding lists with different schemas raises TypeError."""
