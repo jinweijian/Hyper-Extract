@@ -72,3 +72,34 @@ class TestAutoGraphMerge:
         ])
 
         assert len(graph.nodes) == 1
+
+    def test_merge_batch_data_empty_first_chunk(self, llm_client, embedder):
+        """merge_batch_data tolerates a chunk that produced no nodes/edges.
+
+        Previously the first sublist being empty raised IndexError via
+        nodes_lists[0][0] / edges_lists[0][0].
+        """
+        graph = AutoGraph(
+            node_schema=Entity,
+            edge_schema=Relation,
+            node_key_extractor=lambda x: x.name,
+            edge_key_extractor=lambda x: f"{x.source}-{x.relation_type}-{x.target}",
+            nodes_in_edge_extractor=lambda x: (x.source, x.target),
+            llm_client=llm_client,
+            embedder=embedder,
+        )
+
+        # First chunk produced nothing; the second carries the real data.
+        nodes_lists = [
+            [],
+            [Entity(name="Apple", type="ORGANIZATION", properties={})],
+        ]
+        edges_lists = [
+            [],
+            [Relation(source="Apple", target="Steve", relation_type="founded_by")],
+        ]
+
+        result = graph.merge_batch_data((nodes_lists, edges_lists))
+
+        assert {n.name for n in result.nodes} == {"Apple"}
+        assert len(result.edges) == 1
