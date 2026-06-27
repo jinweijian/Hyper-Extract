@@ -1,6 +1,6 @@
 """Output schema parser."""
 
-from typing import List
+from typing import List, Optional
 from .schemas import (
     FieldSchema,
     NaiveOutputSchema,
@@ -33,8 +33,14 @@ def build_naive_schema(
             kwargs["default"] = field.default
         elif field.required is False:  # 非必填且无默认值时，设 default=None
             kwargs["default"] = None
+        # Use Optional type for non-required fields so None values pass validation
+        base_type = TYPE_MAPPING[field.type]
+        if field.required is False:
+            field_type = Optional[base_type]
+        else:
+            field_type = base_type
         schema_fields[field.name] = (
-            TYPE_MAPPING[field.type],
+            field_type,
             Field(**kwargs),
         )
     return create_model(name, __doc__=description, **schema_fields)
