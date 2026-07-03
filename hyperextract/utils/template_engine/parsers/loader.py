@@ -54,11 +54,14 @@ def _localize_data(
         return value
     if isinstance(value, list):
         return "\n".join(f"{i + 1}. {item}" for i, item in enumerate(value))
-    dict_value = value.get(language)
+    # Fall back to English (then empty) when the requested language is absent,
+    # so the return is always a str — a missing key otherwise returns None.
+    dict_value = value.get(language, value.get("en"))
     if isinstance(dict_value, str):
         return dict_value
     if isinstance(dict_value, list):
         return "\n".join(f"{i + 1}. {item}" for i, item in enumerate(dict_value))
+    return ""
 
 
 def _localize_field(field: FieldSchema, language: str) -> FieldSchema:
