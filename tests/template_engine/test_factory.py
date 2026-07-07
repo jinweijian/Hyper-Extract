@@ -47,6 +47,16 @@ class TestTemplateFactoryCreateMethod:
                 embedder=embedder,
             )
 
+    def test_create_from_templatecfg_instance(self, llm_client, embedder):
+        """create() accepts a TemplateCfg instance (documented + typed source)."""
+        cfg = Gallery.get("general/model")
+
+        result = TemplateFactory.create(cfg, "en", llm_client, embedder)
+
+        assert result is not None
+        assert result.metadata["template"] == cfg.name
+        assert result.metadata["lang"] == "en"
+
     def test_create_method_template(self, llm_client, embedder):
         """Test creating a method template."""
         result = TemplateFactory.create(
