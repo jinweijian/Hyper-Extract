@@ -27,12 +27,19 @@
 
 当前 HE 应用层 **没有内置身份认证或授权**。生产环境应通过 API Gateway、Service Mesh、mTLS 或受控内网限制访问。若网关增加了 `Authorization` 等请求头，以实际部署约定为准。
 
-模型服务密钥由 HE 部署侧的 Model Profile 管理，调用方不得在任务请求中传递 OpenAI、Anthropic、Embedding 或其他模型密钥。当前实现中，API 为计算 Profile 指纹也会调用完整 Profile 解析，因此 API 和 Worker 都必须能解析 Profile 所需的配置与环境变量；API 不会把密钥返回给调用方。
+模型服务密钥由 HE 部署侧的 Model Profile 管理，调用方不得在任务请求中传递 OpenAI、Anthropic、Embedding 或其他模型密钥。API 与 Worker 读取同一份 Profile 定义文件（TOML 中只含模型地址与密钥环境变量名），但只有 Worker 解析密钥值：API 用 `public_descriptor()` 计算不含密钥的 Profile 指纹，因此 API 进程不需要任何模型密钥环境变量；Worker 通过 `resolve_runtime()` 解析命名的密钥变量并独占模型网络出口。
 
 ### 1.3 上线前最小验收清单
 
 - `GET /health/live` 返回 `200`。
-- `GET /health/ready` 返回 `200`，但仍建议用一个小包完成端到端冒烟测试。
+- `GET /health/ready` 返回 `200`。该端点依次执行六项检查并收集全部失败项，任一失败返回 `503` 且 `error.details` 列出失败的检查名：
+    - `database`：`SELECT 1` 成功；
+    - `migration`：`alembic_version` 等于迁移脚本 head（当前 `0002_service_recovery`）；
+    - `package_root`：`/exchange/packages` 目录存在且可读；
+    - `run_root`：在 `/exchange/runs` 创建、`fsync` 并删除探针文件成功；
+    - `model_profiles`：配置的 Profile 文件可解析，默认 Profile 能产出公开描述符；
+    - `worker`：存在心跳时间戳新于 `2 * heartbeat_seconds` 的 Worker。
+  响应中绝不包含数据库 URL 或任何密钥值。仍建议用一个小包完成端到端冒烟测试。
 - `GET /v1/capabilities` 包含 `course_graph`、Document Package `1.1` 和 `file`。
 - 调用方写入的最终包目录能被 HE API 和 Worker 以同一个绝对路径读取。
 - 一个最小包能通过 `POST /v1/document-packages/validate`。
@@ -834,7 +841,7 @@ HTTP 状态码为 `503`。
 
 ```json
 {
-  "contract_version": "1.0",
+  "contract_version": "1.1",
   "package_uri": "file:///exchange/packages/course-20260714.hepkg/",
   "sha256": "<64 位小写十六进制规范包指纹>"
 }
@@ -842,13 +849,9 @@ HTTP 状态码为 `503`。
 
 | 字段 | 类型 | 必填 | 约束 |
 |---|---|---:|---|
-| `contract_version` | string | 是 | 固定 `1.0` |
+| `contract_version` | string | 是 | `1.0` 或 `1.1`，须与 `manifest.schema_version` 一致 |
 | `package_uri` | string | 是 | 见 `package_uri` 契约 |
 | `sha256` | string | 是 | `^[0-9a-f]{64}$` |
-
-!!! important "API contract_version 与 Package schema_version 当前不是同一个值"
-
-    当前请求模型仍要求 `contract_version="1.0"`，即使 `package_uri` 指向的是 `manifest.schema_version="1.1"` 的新包。直接发送 `contract_version="1.1"` 会得到 FastAPI 422。调用方在当前版本必须按示例发送 `1.0`，并以 validate 响应的 `schema_version` 判断实际 Package 版本；这是现有 API 命名/版本语义的已知边界。
 
 成功响应 `200`：
 
@@ -872,6 +875,8 @@ HTTP 状态码为 `503`。
 | HTTP | `error.code` | 含义 | 处理 |
 |---:|---|---|---|
 | 422 | `DOCUMENT_PACKAGE_INVALID` | URI、路径、结构、Schema、文件或内容完整性错误 | 修复后发布到新的最终目录，再验证 |
+| 422 | `DOCUMENT_PACKAGE_VERSION_MISMATCH` | `contract_version` 与 `manifest.schema_version` 不一致 | 用与包一致的版本号重新请求 |
+| 422 | `DOCUMENT_PACKAGE_LAYOUT_INVALID` | 包未采用标准服务布局（`outline.json`/`provenance.jsonl`/`content/`，v1.1 缺少 `extraction-brief.yaml`） | 按标准布局重新发布包 |
 | 422 | `DOCUMENT_PACKAGE_HASH_MISMATCH` | 服务端计算的规范包指纹与请求不一致 | 核对 canonical 算法和包是否被修改 |
 
 Brief 路径、扩展名、大小、文件哈希、YAML 或字段 Schema 错误均归入 `DOCUMENT_PACKAGE_INVALID`，当前没有单独的 `EXTRACTION_BRIEF_INVALID` 错误码。Document Package 1.0 的成功响应中 `extraction_brief` 为 `null`。
@@ -895,7 +900,7 @@ Content-Type: application/json
 {
   "input": {
     "type": "document_package",
-    "contract_version": "1.0",
+    "contract_version": "1.1",
     "package_uri": "file:///exchange/packages/course-20260714.hepkg/",
     "package_format": "directory",
     "sha256": "<64 位小写十六进制规范包指纹>"
@@ -929,7 +934,7 @@ Content-Type: application/json
 | 路径 | 类型 | 必填 | 默认值/约束 |
 |---|---|---:|---|
 | `input.type` | string | 是 | 固定 `document_package` |
-| `input.contract_version` | string | 是 | 固定 `1.0` |
+| `input.contract_version` | string | 是 | `1.0` 或 `1.1`，须与 Package `schema_version` 一致 |
 | `input.package_uri` | string | 是 | `file://` 目录 URI |
 | `input.package_format` | string | 是 | 固定 `directory` |
 | `input.sha256` | string | 是 | 64 位小写十六进制规范包指纹 |
@@ -976,6 +981,7 @@ Content-Type: application/json
     "self": "/v1/runs/run_7c73af29b37f40c59f2eea2dfef3d6ad",
     "cancel": "/v1/runs/run_7c73af29b37f40c59f2eea2dfef3d6ad/cancel",
     "resume": "/v1/runs/run_7c73af29b37f40c59f2eea2dfef3d6ad/resume",
+    "errors": "/v1/runs/run_7c73af29b37f40c59f2eea2dfef3d6ad/errors",
     "artifacts": "/v1/runs/run_7c73af29b37f40c59f2eea2dfef3d6ad/artifacts"
   }
 }
@@ -1031,7 +1037,7 @@ HTTP 状态码为 `404`。
 | `running` | 否 | Worker 正在处理 |
 | `completed` | 是 | 产物已发布，可获取 artifact manifest |
 | `failed` | 是 | 本次尝试失败；根据 `resumable` 决定是否可恢复 |
-| `cancelled` | 是 | 排队任务已取消；当前 running 任务的取消状态收口存在限制，见取消接口和“当前 v1 边界” |
+| `cancelled` | 是 | 排队任务立即取消；running 任务在安全检查点协作停止后由 Worker 收口为 `cancelled` |
 
 常见阶段按当前 Pipeline 顺序为：
 
@@ -1068,13 +1074,11 @@ queued -> ingest -> chunk_plan -> local_extract -> deduplicate
 无请求 body。取消是状态请求，不应通过关闭客户端连接实现。
 
 - `queued`：立即转换为 `cancelled`。
-- `running`：设置 `cancel_requested=true`，Pipeline 在安全检查点协作停止；成功响应不等于已到终态，必须继续轮询。
+- `running`：设置 `cancel_requested=true`，Pipeline 在安全检查点协作停止；Worker 捕获取消后通过 `mark_cancelled()` 把任务收口为 `cancelled`。成功响应不等于已到终态，必须继续轮询。
 - 其他状态：返回 `409 RUN_NOT_CANCELLABLE`。
 - 不存在：返回 `404 RUN_NOT_FOUND`。
 
 成功响应 `200` 为完整任务对象。
-
-当前实现尚有一个对接前应修复的状态机缺口：Worker 捕获协作取消后会再次调用取消逻辑，但 Repository 对 `running` 状态只记录取消请求，没有把它转换为 `cancelled`。因此 running 任务可能在执行停止后仍停留在 `running`。修复前，调用方需要为该情况配置超时告警并由运维处理，不能无限轮询。
 
 ### 6.9 `POST /v1/runs/{run_id}/resume`
 
@@ -1116,6 +1120,29 @@ queued -> ingest -> chunk_plan -> local_extract -> deduplicate
 ```
 
 `path` 相对于 `output.artifacts_uri`。调用方应拒绝绝对路径或包含 `..` 的异常 manifest 条目，即使服务端正常情况下不会生成它们。
+
+### 6.11 `GET /v1/runs/{run_id}/errors`
+
+返回该任务的失败历史，按发生顺序排列。仅暴露稳定字段，绝不包含异常 repr、请求头、供应商响应体、密钥或完整 Prompt 内容——这些只持久化在 `diagnostics/attempts/` 下供运维取证。任务不存在时返回 `404 RUN_NOT_FOUND`。
+
+成功响应 `200`：
+
+```json
+{
+  "run_id": "run_7c73af29b37f40c59f2eea2dfef3d6ad",
+  "errors": [
+    {
+      "attempt": 1,
+      "code": "MODEL_RATE_LIMIT_EXHAUSTED",
+      "source": "worker",
+      "message": "Provider request failed after retries",
+      "occurred_at": "2026-07-14T10:00:00Z"
+    }
+  ]
+}
+```
+
+`code` 取自稳定失败归一化（鉴权/非法输入不可恢复，瞬态/重试耗尽/Worker 恢复耗尽可恢复）；`message` 已脱敏并截断至 500 字符。调用方应优先用 `code` 驱动重试与告警策略，`message` 仅供人读。
 
 ## 7. 产物契约与消费顺序
 
@@ -1278,7 +1305,7 @@ curl --fail-with-body "$HE_BASE_URL/v1/capabilities"
 curl --fail-with-body \
   -X POST "$HE_BASE_URL/v1/document-packages/validate" \
   -H 'Content-Type: application/json' \
-  -d "{\"contract_version\":\"1.0\",\"package_uri\":\"$PACKAGE_URI\",\"sha256\":\"$PACKAGE_SHA256\"}"
+  -d "{\"contract_version\":\"1.1\",\"package_uri\":\"$PACKAGE_URI\",\"sha256\":\"$PACKAGE_SHA256\"}"
 
 curl --fail-with-body \
   -X POST "$HE_BASE_URL/v1/runs" \
@@ -1287,7 +1314,7 @@ curl --fail-with-body \
   -d "{
     \"input\":{
       \"type\":\"document_package\",
-      \"contract_version\":\"1.0\",
+      \"contract_version\":\"1.1\",
       \"package_uri\":\"$PACKAGE_URI\",
       \"package_format\":\"directory\",
       \"sha256\":\"$PACKAGE_SHA256\"
@@ -1324,14 +1351,11 @@ curl --fail-with-body "$HE_BASE_URL/v1/runs/$RUN_ID/artifacts"
 - Model Profile 名称由部署双方约定，能力接口当前不返回 Profile 列表。
 - 已发布包必须由调用方保证不可变；当前没有文件锁或对象版本 ID。
 - Document Package 1.1 强制声明 Brief；1.0 仍可不带 Brief 并沿用旧的单消息 Prompt。底层验证器也允许 1.0 包声明可选 Brief，但新生产接入不应依赖该过渡行为。
-- 任务创建/验证请求中的 `contract_version` 当前仍固定为 `1.0`，与 Package `manifest.schema_version=1.1` 不同；发送 `contract_version=1.1` 会被请求 Schema 拒绝。
+- 任务创建/验证请求的 `contract_version` 接受 `1.0` 与 `1.1`，且必须与 `manifest.schema_version` 一致；声明版本与包实际版本不符会返回 `DOCUMENT_PACKAGE_VERSION_MISMATCH`，非标准布局返回 `DOCUMENT_PACKAGE_LAYOUT_INVALID`。
 - Brief 的 `evaluation` 指令当前未接入 Course API Pipeline；API Worker 设置 `community_reports=false`，所以 `community` 指令通常也不会触发模型调用。
 - `additional_instructions` 和完整 `extensions` 当前进入所有已编译模型阶段；不要在其中存放模型密钥或敏感数据。
 - Brief 和编译后的 Prompt 会保存在 `runs/<run_id>/work/.he-run/`，不进入公开 artifact manifest，但需要通过共享卷权限和清理策略保护。
 - `context_policy`、`priority` 和 `budget` 当前已进入请求契约，但尚未实际控制执行器。
-- 当前 Profile 公共描述符的计算路径也要求模型密钥环境变量。仓库的 `docker/service.compose.yml` 只给 Worker 配置了 `env_file` 和 `HE_SERVICE_MODEL_PROFILES`，按现有代码直接启动时 API 可能对所有创建请求返回 `MODEL_PROFILE_INVALID`；部署前必须让 API 与 Worker 解析到同一 Profile，或重构公共描述符使其不依赖密钥。
-- running 任务的协作取消尚未可靠转换为 `cancelled`；对外上线前应补齐状态转换和测试。
-- Worker 领取任务后会记录 lease，但当前没有过期 lease 扫描/重新排队逻辑；Worker 进程异常退出可能让任务长期停在 `running`，调用方只能超时告警，不能对该状态调用 resume。
-- 契约发现响应把 `outline.json`、`provenance.jsonl` 和 `content/` 列为固定必需条目，但底层验证器实际按 manifest 声明的 outline/provenance 路径读取，也未单独检查 `content/` 目录；外部 v1 生产方应遵守固定标准布局，服务端后续应统一发现契约与验证行为。
+- 契约发现响应把 `outline.json`、`provenance.jsonl` 和 `content/` 列为固定必需条目，服务端 `validate_service_package_layout` 会强制该标准布局（v1.1 还要求 `extraction-brief.yaml`）；外部 v1 生产方应遵守固定标准布局。
 - 消费方应按 `schema_version` 做兼容分支，忽略响应中新出现的非关键字段，但不能忽略未知枚举值或缺失的必需字段。
 - 新的不兼容数据契约应发布新 `contract_version` / `schema_version`，而不是静默改变 v1 含义。

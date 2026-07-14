@@ -24,13 +24,25 @@ Discover the contract with:
 curl http://he-api:8000/v1/contracts/document-package/v1
 ```
 
-Validate before queueing:
+Validate before queueing. `contract_version` must match the package's
+`manifest.schema_version`; a mismatch returns `DOCUMENT_PACKAGE_VERSION_MISMATCH`
+and a non-standard layout returns `DOCUMENT_PACKAGE_LAYOUT_INVALID`:
 
 ```bash
 curl -X POST http://he-api:8000/v1/document-packages/validate \
   -H 'Content-Type: application/json' \
-  -d '{"contract_version":"1.0","package_uri":"file:///exchange/packages/course.hepkg/","sha256":"<canonical-fingerprint>"}'
+  -d '{"contract_version":"1.1","package_uri":"file:///exchange/packages/course.hepkg/","sha256":"<canonical-fingerprint>"}'
 ```
+
+## Readiness
+
+`GET /health/ready` runs six checks and collects every failure: `database`
+(`SELECT 1`), `migration` (`alembic_version` equals the script head), `package_root`
+(readable), `run_root` (create/fsync/delete a probe file), `model_profiles`
+(the configured file parses and the default profile yields a public descriptor),
+and `worker` (a heartbeat newer than `2 * heartbeat_seconds`). Any failure
+returns `503` with the failed check names in `error.details`; the response never
+includes database URLs or secret values.
 
 ## Create and observe a run
 
@@ -39,7 +51,7 @@ curl -X POST http://he-api:8000/v1/runs \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: course-2026-001' \
   -d '{
-    "input":{"type":"document_package","contract_version":"1.0","package_uri":"file:///exchange/packages/course.hepkg/","package_format":"directory","sha256":"<canonical-fingerprint>"},
+    "input":{"type":"document_package","contract_version":"1.1","package_uri":"file:///exchange/packages/course.hepkg/","package_format":"directory","sha256":"<canonical-fingerprint>"},
     "pipeline":{"name":"course_graph","profile":{"name":"course_knowledge_graph","version":"1"}},
     "execution":{"model_profile":"minimax-course-default","context_policy":"auto","priority":"normal"}
   }'
@@ -52,7 +64,13 @@ the same key is rejected.
 
 Use `POST /v1/runs/{run_id}/cancel` and
 `POST /v1/runs/{run_id}/resume`. Cancellation happens at checkpoint-safe
-boundaries. Resume uses the same logical run and existing `.he-run` files.
+boundaries and the Worker finalizes a running cancellation to `cancelled`.
+Resume uses the same logical run and existing `.he-run` files.
+
+`GET /v1/runs/{run_id}/errors` returns the stable, redacted failure history
+(attempt, code, source, message, occurred_at). It never exposes exception repr,
+headers, provider bodies, keys, or full prompt content; those persist only under
+`diagnostics/attempts/` for operator forensics.
 
 ## Consume artifacts
 
