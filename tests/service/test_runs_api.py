@@ -1,11 +1,11 @@
 from hyperextract.documents import document_package_fingerprint
 
 
-def request_body(package_path):
+def request_body(package_path, version="1.0"):
     return {
         "input": {
             "type": "document_package",
-            "contract_version": "1.0",
+            "contract_version": version,
             "package_uri": package_path.as_uri(),
             "package_format": "directory",
             "sha256": document_package_fingerprint(package_path),
@@ -53,3 +53,21 @@ def test_create_rejects_unknown_model_profile_before_queue(client, package_path)
     )
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "MODEL_PROFILE_INVALID"
+
+
+def test_create_rejects_declared_version_mismatch(client, package_v1_1):
+    payload = request_body(package_v1_1, version="1.0")
+    response = client.post(
+        "/v1/runs", headers={"Idempotency-Key": "mismatch"}, json=payload
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "DOCUMENT_PACKAGE_VERSION_MISMATCH"
+
+
+def test_create_accepts_v1_1_package(client, package_v1_1):
+    payload = request_body(package_v1_1, version="1.1")
+    response = client.post(
+        "/v1/runs", headers={"Idempotency-Key": "v1-1"}, json=payload
+    )
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"

@@ -4,7 +4,11 @@ from hyperextract.documents import (
     document_package_fingerprint,
     validate_document_package,
 )
-from hyperextract.service.contracts import document_package_contract
+from hyperextract.service.contracts import (
+    ServicePackageContractError,
+    document_package_contract,
+    validate_service_package_layout,
+)
 from hyperextract.service.errors import ServiceError
 from hyperextract.service.runtime import ServiceRuntime
 
@@ -37,7 +41,10 @@ def validate_package(
     try:
         package = runtime.storage.resolve_package_uri(payload.package_uri)
         validated = validate_document_package(package)
+        validate_service_package_layout(validated, payload.contract_version)
         actual = document_package_fingerprint(package)
+    except ServicePackageContractError as error:
+        raise ServiceError(422, error.code, error.message) from error
     except ValueError as error:
         raise ServiceError(422, "DOCUMENT_PACKAGE_INVALID", str(error)) from error
     if actual != payload.sha256:

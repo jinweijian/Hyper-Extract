@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+DocumentPackageVersion = Literal["1.0", "1.1"]
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -11,7 +13,7 @@ class StrictModel(BaseModel):
 
 class RunInput(StrictModel):
     type: Literal["document_package"]
-    contract_version: Literal["1.0"]
+    contract_version: DocumentPackageVersion
     package_uri: str
     package_format: Literal["directory"]
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -53,6 +55,6 @@ class RunCreateRequest(StrictModel):
 
 
 class ValidatePackageRequest(StrictModel):
-    contract_version: Literal["1.0"]
+    contract_version: DocumentPackageVersion
     package_uri: str
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")

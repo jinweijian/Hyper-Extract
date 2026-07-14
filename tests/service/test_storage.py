@@ -23,3 +23,12 @@ def test_package_uri_rejects_protocol_escape_and_symlink(exchange_root, package_
     link.symlink_to(package_path, target_is_directory=True)
     with pytest.raises(ValueError, match="PATH_FORBIDDEN"):
         store.resolve_package_uri(link.as_uri())
+
+
+def test_package_uri_rejects_query_and_fragment(exchange_root, package_path):
+    store = SharedVolumeStore(exchange_root)
+    uri = package_path.as_uri()
+    with pytest.raises(ValueError, match="DOCUMENT_PACKAGE_URI_INVALID"):
+        store.resolve_package_uri(f"{uri}?revision=2")
+    with pytest.raises(ValueError, match="DOCUMENT_PACKAGE_URI_INVALID"):
+        store.resolve_package_uri(f"{uri}#section")

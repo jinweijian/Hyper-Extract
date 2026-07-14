@@ -7,9 +7,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header
 
-from hyperextract.documents import document_package_fingerprint
+from hyperextract.documents import document_package_fingerprint, validate_document_package
 from hyperextract.documents.checkpoint import fingerprint
 from hyperextract.service.commands import RunCommand
+from hyperextract.service.contracts import (
+    ServicePackageContractError,
+    validate_service_package_layout,
+)
 from hyperextract.service.errors import ServiceError
 from hyperextract.service.repository import (
     IdempotencyConflict,
@@ -112,7 +116,11 @@ def create_run(
 ) -> RunResponse:
     try:
         package = runtime.storage.resolve_package_uri(payload.input.package_uri)
+        validated = validate_document_package(package)
+        validate_service_package_layout(validated, payload.input.contract_version)
         actual = document_package_fingerprint(package)
+    except ServicePackageContractError as error:
+        raise ServiceError(422, error.code, error.message) from error
     except ValueError as error:
         raise ServiceError(422, "DOCUMENT_PACKAGE_INVALID", str(error)) from error
     if actual != payload.input.sha256:

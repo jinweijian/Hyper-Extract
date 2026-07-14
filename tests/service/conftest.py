@@ -85,6 +85,14 @@ def package_path(exchange_root):
 
 
 @pytest.fixture
+def package_v1_1(package_path):
+    from tests.documents.test_document_package import _add_extraction_brief
+
+    _add_extraction_brief(package_path)
+    return package_path
+
+
+@pytest.fixture
 def settings(exchange_root):
     from hyperextract.service.settings import ServiceSettings
 
