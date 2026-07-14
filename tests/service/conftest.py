@@ -125,8 +125,70 @@ def running_run(repository):
         request_json={"input": {}},
         output_uri="file:///exchange/runs/run_running/",
     )
-    record, _ = repository.create_or_get(command, "running-key")
-    return record
+    repository.create_or_get(command, "running-key")
+    return repository.claim_next("worker-1", lease_seconds=120)
+
+
+@pytest.fixture
+def cancellable_run(repository):
+    """A running run owned by ``worker-1`` that can be cancelled mid-flight."""
+    from hyperextract.service.commands import RunCommand
+
+    command = RunCommand(
+        run_id="run_cancellable",
+        request_fingerprint="c" * 64,
+        request_json={"input": {}},
+        output_uri="file:///exchange/runs/run_cancellable/",
+    )
+    repository.create_or_get(command, "cancellable-key")
+    return repository.claim_next("worker-1", lease_seconds=120)
+
+
+@pytest.fixture
+def expired_running_run(repository):
+    """A running run whose lease has already expired (crashed worker scenario)."""
+    from datetime import datetime, timedelta, timezone
+
+    from hyperextract.service.commands import RunCommand
+    from hyperextract.service.db_models import RunEntity
+
+    command = RunCommand(
+        run_id="run_expired",
+        request_fingerprint="e" * 64,
+        request_json={"input": {}},
+        output_uri="file:///exchange/runs/run_expired/",
+    )
+    repository.create_or_get(command, "expired-key")
+    repository.claim_next("worker-1", lease_seconds=120)
+    with repository.session_factory.begin() as session:
+        row = session.get(RunEntity, "run_expired")
+        row.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=60)
+    return repository.get("run_expired")
+
+
+@pytest.fixture
+def worker(repository, settings):
+    """A ServiceWorker with a fake executor that raises RunCancelled.
+
+    Used by lifecycle tests in ``test_repository.py`` to verify that a
+    cancellable running run ends up as ``cancelled`` after the worker
+    processes it.
+    """
+    from hyperextract.documents.course_pipeline import RunCancelled
+    from hyperextract.service.artifacts import ArtifactPublisher
+    from hyperextract.service.worker import ServiceWorker
+
+    class CancelExecutor:
+        def execute(self, record):
+            raise RunCancelled("Cancellation requested")
+
+    return ServiceWorker(
+        repository,
+        CancelExecutor(),
+        ArtifactPublisher(settings.run_root),
+        settings,
+        worker_id="worker-1",
+    )
 
 
 @pytest.fixture

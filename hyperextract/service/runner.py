@@ -30,7 +30,7 @@ class CourseRunExecutor:
             community_reports=False,
         )
 
-    def execute(self, record) -> dict[str, object]:
+    def execute(self, record, *, lease_lost=None) -> dict[str, object]:
         request = record.request_json
         execution = request.get("execution") or {}
         profile = self.registry.resolve_runtime(
@@ -68,6 +68,11 @@ class CourseRunExecutor:
                 },
             )
 
+        def should_cancel():
+            if lease_lost is not None and lease_lost.is_set():
+                return True
+            return bool(self.repository.get(record.run_id).cancel_requested)
+
         return run_course_document(
             package,
             work,
@@ -79,8 +84,6 @@ class CourseRunExecutor:
             control=PipelineControl(
                 run_id=record.run_id,
                 event_sink=event_sink,
-                should_cancel=lambda: bool(
-                    self.repository.get(record.run_id).cancel_requested
-                ),
+                should_cancel=should_cancel,
             ),
         )
