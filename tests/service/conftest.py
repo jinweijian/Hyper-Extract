@@ -4,6 +4,8 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+from hyperextract.documents import document_package_fingerprint
+
 
 def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -111,6 +113,70 @@ def repository():
     )
     yield RunRepository(session_factory)
     engine.dispose()
+
+
+@pytest.fixture
+def running_run(repository):
+    from hyperextract.service.commands import RunCommand
+
+    command = RunCommand(
+        run_id="run_running",
+        request_fingerprint="a" * 64,
+        request_json={"input": {}},
+        output_uri="file:///exchange/runs/run_running/",
+    )
+    record, _ = repository.create_or_get(command, "running-key")
+    return record
+
+
+@pytest.fixture
+def failed_run(repository, package_path, settings):
+    """Create a run through the API then mark it failed with attempt history."""
+    from fastapi.testclient import TestClient
+
+    from hyperextract.service.api.app import create_app
+    from hyperextract.service.runtime import create_runtime
+
+    class FakeProfiles:
+        def public_descriptor(self, name):
+            if name != "minimax-course-default":
+                raise KeyError(name)
+            return {"name": name, "fingerprint": "b" * 64}
+
+    runtime = create_runtime(
+        settings=settings,
+        repository=repository,
+        model_profiles=FakeProfiles(),
+    )
+    with TestClient(create_app(runtime=runtime)) as api_client:
+        payload = {
+            "input": {
+                "type": "document_package",
+                "contract_version": "1.0",
+                "package_uri": package_path.as_uri(),
+                "package_format": "directory",
+                "sha256": document_package_fingerprint(package_path),
+            },
+            "pipeline": {
+                "name": "course_graph",
+                "profile": {"name": "course_knowledge_graph", "version": "1"},
+            },
+            "execution": {"model_profile": "minimax-course-default"},
+        }
+        response = api_client.post(
+            "/v1/runs", headers={"Idempotency-Key": "failed"}, json=payload
+        )
+        run_id = response.json()["run_id"]
+        repository.fail(
+            run_id,
+            code="RUN_EXECUTION_FAILED",
+            message="Extraction pipeline failed",
+            resumable=False,
+            source="worker",
+        )
+        from types import SimpleNamespace
+
+        yield SimpleNamespace(run_id=run_id)
 
 
 @pytest.fixture

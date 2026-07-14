@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -32,3 +34,23 @@ class RunResponse(PublicResponse):
     cancel_requested: bool
     output: OutputResponse
     links: RunLinksResponse
+
+
+class ErrorEntryResponse(PublicResponse):
+    """Public projection of a row in ``he_run_errors``.
+
+    The schema deliberately excludes ``details_json`` so the API can never
+    leak exception repr, request headers, provider response bodies, keys, or
+    full Prompt content. Only operator-safe fields are exposed.
+    """
+
+    attempt: int
+    code: str
+    source: str
+    message: str
+    occurred_at: datetime
+
+
+class RunErrorsResponse(PublicResponse):
+    run_id: str
+    errors: list[ErrorEntryResponse]

@@ -26,7 +26,13 @@ from hyperextract.service.storage import OutputLocations
 
 from ..dependencies import get_runtime
 from ..schemas import RunCreateRequest
-from ..schemas.responses import OutputResponse, RunLinksResponse, RunResponse
+from ..schemas.responses import (
+    ErrorEntryResponse,
+    OutputResponse,
+    RunErrorsResponse,
+    RunLinksResponse,
+    RunResponse,
+)
 
 router = APIRouter()
 
@@ -199,3 +205,27 @@ def artifacts(
             500, "ARTIFACT_STATE_INCONSISTENT", "Artifact manifest is missing"
         )
     return json.loads(manifest.read_text(encoding="utf-8"))
+
+
+@router.get("/v1/runs/{run_id}/errors", response_model=RunErrorsResponse)
+def list_run_errors(
+    run_id: str, runtime: ServiceRuntime = Depends(get_runtime)
+) -> RunErrorsResponse:
+    """Return the attempt/error history for ``run_id``.
+
+    The response is redacted at the repository boundary: ``details_json`` is
+    never surfaced, so callers cannot see exception repr, request headers,
+    provider response bodies, keys, or full Prompt content.
+    """
+    _run_or_404(runtime.repository, run_id)
+    errors = [
+        ErrorEntryResponse(
+            attempt=error.attempt,
+            code=error.code,
+            source=error.source,
+            message=error.message,
+            occurred_at=error.occurred_at,
+        )
+        for error in runtime.repository.list_errors(run_id)
+    ]
+    return RunErrorsResponse(run_id=run_id, errors=errors)

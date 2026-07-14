@@ -71,3 +71,32 @@ def test_create_accepts_v1_1_package(client, package_v1_1):
     )
     assert response.status_code == 202
     assert response.json()["status"] == "queued"
+
+
+def test_errors_endpoint_returns_attempt_history(client, failed_run):
+    response = client.get(f"/v1/runs/{failed_run.run_id}/errors")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == failed_run.run_id
+    assert body["errors"][0]["code"] == "RUN_EXECUTION_FAILED"
+    assert body["errors"][0]["attempt"] == 1
+    assert body["errors"][0]["source"] == "worker"
+    assert body["errors"][0]["message"] == "Extraction pipeline failed"
+    assert "occurred_at" in body["errors"][0]
+    # Redaction: response must never leak sensitive fields
+    assert "details" not in body["errors"][0]
+    assert "details_json" not in body["errors"][0]
+    assert "headers" not in body["errors"][0]
+
+
+def test_run_response_includes_errors_link(client, package_path):
+    payload = request_body(package_path)
+    response = client.post("/v1/runs", headers={"Idempotency-Key": "link-1"}, json=payload)
+    body = response.json()
+    assert body["links"]["errors"] == f"/v1/runs/{body['run_id']}/errors"
+
+
+def test_errors_endpoint_returns_404_for_unknown_run(client):
+    response = client.get("/v1/runs/run_unknown/errors")
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "RUN_NOT_FOUND"
