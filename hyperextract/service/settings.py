@@ -13,8 +13,6 @@ class ServiceSettings:
     heartbeat_seconds: int = 30
     poll_seconds: float = 2.0
     max_worker_recoveries: int = 3
-    artifact_retention_days: int = 30
-    cleanup_interval_seconds: int = 3600
     model_profiles_path: Path | None = None
 
     @property
@@ -39,12 +37,6 @@ class ServiceSettings:
             poll_seconds=float(os.environ.get("HE_SERVICE_POLL_SECONDS", "2")),
             max_worker_recoveries=int(
                 os.environ.get("HE_SERVICE_MAX_WORKER_RECOVERIES", "3")
-            ),
-            artifact_retention_days=int(
-                os.environ.get("HE_SERVICE_ARTIFACT_RETENTION_DAYS", "30")
-            ),
-            cleanup_interval_seconds=int(
-                os.environ.get("HE_SERVICE_CLEANUP_INTERVAL_SECONDS", "3600")
             ),
             model_profiles_path=Path(profiles) if profiles else None,
         )

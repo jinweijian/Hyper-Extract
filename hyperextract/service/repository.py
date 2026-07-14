@@ -3,11 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, inspect, select, text, update
 from sqlalchemy.exc import IntegrityError
-
 from .commands import RunCommand
-from .db_models import RunAttemptEntity, RunEntity, RunErrorEntity, WorkerHeartbeatEntity, utcnow
+from .db_models import (
+    RunAttemptEntity,
+    RunEntity,
+    RunErrorEntity,
+    WorkerHeartbeatEntity,
+    utcnow,
+)
 
 
 class IdempotencyConflict(RuntimeError):
@@ -392,3 +397,43 @@ class RunRepository:
                     row.resume_from_checkpoint = True
                     recovered.append(row.run_id)
         return recovered
+
+    def ping(self) -> None:
+        """Execute ``SELECT 1`` against the database.
+
+        Raises if the database is unreachable or the connection is broken.
+        Used by the readiness endpoint to verify the database is queryable.
+        """
+        with self.session_factory() as session:
+            session.execute(text("SELECT 1"))
+
+    def current_migration_revision(self) -> str | None:
+        """Return the Alembic revision recorded in the database, or ``None``.
+
+        Returns ``None`` when the ``alembic_version`` table does not exist
+        (migrations have never been applied). This is a readiness failure in
+        production but must not crash the health check.
+        """
+        with self.session_factory() as session:
+            engine = session.bind
+            if not inspect(engine).has_table("alembic_version"):
+                return None
+            return session.scalar(text("SELECT version_num FROM alembic_version"))
+
+    def latest_worker_heartbeat(self) -> datetime | None:
+        """Return the most recent worker heartbeat timestamp, or ``None``.
+
+        Used by the readiness endpoint to verify at least one Worker has
+        reported recently (within ``2 * heartbeat_seconds``).
+        """
+        with self.session_factory() as session:
+            return session.scalar(select(func.max(WorkerHeartbeatEntity.last_seen_at)))
+
+    def delete_worker_heartbeats(self) -> None:
+        """Remove every worker heartbeat row.
+
+        Used by readiness tests to simulate a deployment with no recent Worker
+        activity. Not called by production code paths.
+        """
+        with self.session_factory.begin() as session:
+            session.execute(delete(WorkerHeartbeatEntity))
