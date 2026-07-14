@@ -168,5 +168,5 @@ Thumbs.db
 kb/
 .graphify-out/
 
-# Claude superpowers plans (keep repo docs clean)
-docs/superpowers/
+
+.worktrees/
