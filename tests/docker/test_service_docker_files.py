@@ -140,3 +140,35 @@ def test_docker_readme_documents_exchange_and_scaling():
     assert "/exchange" in text
     assert "10001" in text
     assert "--scale he-worker" in text
+
+
+def test_api_uses_readiness_and_worker_has_shutdown_window(compose):
+    api = compose["services"]["he-api"]
+    worker = compose["services"]["he-worker"]
+    assert "/health/ready" in " ".join(api["healthcheck"]["test"])
+    assert worker["stop_grace_period"] == "90s"
+    assert "container_name" not in worker
+
+
+def test_api_healthcheck_timing_and_grace(compose):
+    api = compose["services"]["he-api"]
+    hc = api["healthcheck"]
+    assert hc["interval"] == "10s"
+    assert hc["timeout"] == "3s"
+    assert hc["start_period"] == "20s"
+    assert api["stop_grace_period"] == "20s"
+
+
+def test_worker_has_no_http_healthcheck(compose):
+    worker = compose["services"]["he-worker"]
+    # A Worker must not carry a misleading Docker HTTP healthcheck: long-running
+    # model calls would otherwise be killed by the orchestrator.
+    assert "healthcheck" not in worker
+
+
+def test_api_and_worker_restart_unless_stopped(compose):
+    services = compose["services"]
+    assert services["he-api"]["restart"] == "unless-stopped"
+    assert services["he-worker"]["restart"] == "unless-stopped"
+    # Migration remains one-shot.
+    assert services["he-migrate"]["restart"] == "no"

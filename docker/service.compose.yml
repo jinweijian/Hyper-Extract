@@ -35,6 +35,8 @@ services:
       context: ..
       dockerfile: docker/service.Dockerfile
     command: ["uv", "run", "--no-sync", "he-api"]
+    restart: unless-stopped
+    stop_grace_period: 20s
     environment:
       HE_SERVICE_DATABASE_URL: postgresql+psycopg://hyperextract:${POSTGRES_PASSWORD}@postgres/hyperextract
       HE_SERVICE_EXCHANGE_ROOT: /exchange
@@ -47,6 +49,12 @@ services:
         condition: service_healthy
       he-migrate:
         condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://127.0.0.1:8000/health/ready',timeout=2).status==200 else 1)\""]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 3
     networks: [database, service-api]
 
   he-worker:
@@ -55,6 +63,8 @@ services:
       context: ..
       dockerfile: docker/service.Dockerfile
     command: ["uv", "run", "--no-sync", "he-worker"]
+    restart: unless-stopped
+    stop_grace_period: 90s
     env_file:
       - path: .env
         required: false

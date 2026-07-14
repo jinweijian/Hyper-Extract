@@ -117,6 +117,29 @@ postgres healthy → he-migrate exits 0 → he-api + he-worker start
 `he-migrate` runs `alembic upgrade head` exactly once (`restart: "no"`) and
 owns the production schema. Runtime code never calls `create_all()`.
 
+## Health, shutdown, and restart
+
+| Service     | Healthcheck          | Stop grace | Restart          |
+|-------------|----------------------|------------|------------------|
+| `postgres`  | `pg_isready`         | default    | (default)        |
+| `he-migrate`| none (one-shot)      | default    | `"no"`           |
+| `he-api`    | `GET /health/ready`  | 20s        | `unless-stopped` |
+| `he-worker` | none                 | 90s        | `unless-stopped` |
+
+The API healthcheck probes `/health/ready` (database, migration head, volume
+writability, Model Profile parse, recent Worker heartbeat) every 10s with a
+3s timeout and a 20s start period. Compose will only route traffic to the API
+once it reports ready.
+
+The Worker deliberately has **no Docker HTTP healthcheck**: a single model
+call can legitimately run for many minutes, and a naive liveness probe would
+kill healthy work. Instead the Worker publishes a database heartbeat and renews
+its task lease on an independent thread. A Worker that stops heartbeating is
+detected by lease expiry, not by an HTTP probe. The 90-second stop grace
+period lets in-flight model calls drain on `docker compose stop` before the
+container is force-killed; lease renewal stops during shutdown so an expired
+lease can be recovered by another replica.
+
 ## Scaling Workers
 
 Workers claim runs from PostgreSQL with `SELECT ... FOR UPDATE SKIP LOCKED` and
