@@ -14,7 +14,7 @@
 | 共享存储 | 能向 `packages` 区域写目录包，并从 `runs` 区域读取结果 | API、Worker、调用方挂载同一存储，且容器内绝对路径一致 |
 | 包生成器 | 能生成 Document Package v1、文件 SHA-256 和规范包指纹 | 提供 `/v1/contracts/document-package/v1` 契约发现接口 |
 | Pipeline | 使用 `course_graph` + `course_knowledge_graph@1` | 部署对应 Pipeline |
-| 模型 Profile | 请求中只传已约定的 Profile 名称 | 保证 API 与 Worker 能解析同一 Profile；默认名称为 `minimax-course-default` |
+| 模型 Profile | 请求中只传已约定的 Profile 名称 | 保证 API 与 Worker 能解析同一 Profile；默认名称为 `openai-compatible-default` |
 | 幂等策略 | 为一次逻辑任务生成并持久化唯一 `Idempotency-Key` | 持久化幂等键与请求指纹 |
 | 状态消费 | 保存 `run_id`，实现轮询、超时、取消和恢复 | 保持 API 与 Worker 正常运行 |
 | 结果校验 | 读取 manifest、检查 `_SUCCESS`、校验每个文件 SHA-256 | 原子发布完整产物 |
@@ -913,7 +913,7 @@ Content-Type: application/json
     }
   },
   "execution": {
-    "model_profile": "minimax-course-default",
+    "model_profile": "openai-compatible-default",
     "context_policy": "auto",
     "priority": "normal",
     "budget": {
@@ -942,7 +942,7 @@ Content-Type: application/json
 | `pipeline.profile.name` | string | 是 | 固定 `course_knowledge_graph` |
 | `pipeline.profile.version` | string | 是 | 固定 `1` |
 | `execution` | object | 否 | 整体可省略 |
-| `execution.model_profile` | string | 否 | 默认 `minimax-course-default`；必须是服务端可用 Profile |
+| `execution.model_profile` | string | 否 | 默认 `openai-compatible-default`；必须是服务端可用 Profile |
 | `execution.context_policy` | enum | 否 | `auto`（默认）、`preserve`、`repack` |
 | `execution.priority` | enum | 否 | `normal`（默认）或 `low` |
 | `execution.budget.max_model_calls` | integer/null | 否 | `>=1` |
@@ -1323,7 +1323,7 @@ curl --fail-with-body \
       \"name\":\"course_graph\",
       \"profile\":{\"name\":\"course_knowledge_graph\",\"version\":\"1\"}
     },
-    \"execution\":{\"model_profile\":\"minimax-course-default\"},
+    \"execution\":{\"model_profile\":\"openai-compatible-default\"},
     \"client_context\":{
       \"service\":\"course-platform\",
       \"task_id\":\"task-789\",

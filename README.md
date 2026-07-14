@@ -134,7 +134,7 @@ Hyper-Extract relies on the LLM's structured output capability (`json_schema` or
 | **阿里云百炼** | qwen-plus, qwen-turbo, deepseek-r1 |
 | **Local vLLM** | Qwen3.5-9B (GPTQ-Marlin) |
 
-**Embedding models** (semantic search) work with any OpenAI-compatible endpoint: `text-embedding-3-small`, `text-embedding-v4` (Bailian), `bge-m3` (local vLLM).
+**Embedding models** (semantic search) use the OpenAI Embeddings transport when the endpoint passes the declared Profile constraints for batch size, token limits, input form, dimensions, and response alignment. Verified routes include `text-embedding-3-small`, `text-embedding-v4` (Bailian), and `bge-m3` (local vLLM).
 
 > **Anthropic note:** Claude is used for the **LLM** (set `ANTHROPIC_API_KEY`). Anthropic has no embeddings API, so pair it with an OpenAI-compatible embedder:
 > ```python

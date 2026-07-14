@@ -1,8 +1,36 @@
-[profiles.minimax-course-default]
-llm = "vllm:MiniMax-M2.7-highspeed@https://api.minimaxi.com/v1"
-llm_api_key_env = "MIMIMAX_API_KEY"
-embedder = "vllm:Qwen/Qwen3-Embedding-8B@https://api.siliconflow.cn/v1"
+[profiles.minimax-m27]
+transport = "openai_chat"
+llm = "openai:MiniMax-M2.7-highspeed@https://api.minimaxi.com/v1"
+llm_api_key_env = "MINIMAX_API_KEY"
+embedder = "openai:Qwen/Qwen3-Embedding-8B@https://api.siliconflow.cn/v1"
 embedder_api_key_env = "EMBEDDING_API_KEY"
-structured_output_mode = "text_json"
-output_repair_attempts = 1
+llm_rate_limit_group = "minimax-production-account"
+embedder_rate_limit_group = "siliconflow-embedding-account"
+probe_required = true
 request_timeout = 900
+
+[profiles.minimax-m27.capabilities]
+structured_output_modes = ["text_json"]
+preferred_structured_output_mode = "text_json"
+structured_output_fallback_order = ["text_json"]
+reasoning_content_mode = "separate_field"
+output_token_parameter = "max_tokens"
+supported_parameters = ["max_output_tokens", "timeout_seconds"]
+context_tokens = 65536
+max_output_tokens = 8192
+recommended_concurrency = 4
+
+[profiles.minimax-m27.embedding_capabilities]
+transport = "openai_embeddings"
+accepts_token_ids = false
+max_batch_items = 10
+max_input_tokens_per_item = 8191
+supports_dimensions = false
+empty_input_policy = "quarantine"
+
+[profiles.minimax-m27.recovery]
+validation_repair_attempts = 1
+validation_retry_attempts = 3
+transient_retry_attempts = 4
+invalid_list_item_policy = "quarantine"
+invalid_item_ratio_threshold = 0.2

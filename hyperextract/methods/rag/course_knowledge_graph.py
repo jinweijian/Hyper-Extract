@@ -19,6 +19,8 @@ from hyperextract.briefs import ExtractionBrief, render_extraction_brief
 from hyperextract.types import AutoGraph
 from hyperextract.documents.structured_output import StructuredOutputInvoker
 from hyperextract.documents.model_usage import ModelUsageTracker
+from hyperextract.providers.artifacts import ModelArtifactStore
+from hyperextract.providers.gateway import ModelExecutionGateway
 from hyperextract.profiles.course import (
     CourseExtractionProfile,
     compile_course_profile,
@@ -165,6 +167,7 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
         structured_output_mode: str | None = None,
         output_repair_attempts: int | None = None,
         extraction_brief: ExtractionBrief | None = None,
+        generation_gateway: ModelExecutionGateway | None = None,
     ) -> None:
         self.profile = profile or _DEFAULT_PROFILE
         self.extraction_brief = extraction_brief
@@ -177,6 +180,8 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
         self.usage_tracker = ModelUsageTracker()
         self.structured_output_mode = structured_output_mode
         self.output_repair_attempts = output_repair_attempts
+        self.model_artifact_store: ModelArtifactStore | None = None
+        self.generation_gateway = generation_gateway
         super().__init__(
             node_schema=CourseNode,
             edge_schema=CourseEdge,
@@ -235,6 +240,8 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
                 repair_attempts=repair_attempts,
                 usage_tracker=self.usage_tracker,
                 operation="local_nodes",
+                artifact_store=self.model_artifact_store,
+                gateway=self.generation_gateway,
             ).as_runnable()
         )
         self.chunk_extractor = (
@@ -246,6 +253,8 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
                 repair_attempts=repair_attempts,
                 usage_tracker=self.usage_tracker,
                 operation="local_chunk",
+                artifact_store=self.model_artifact_store,
+                gateway=self.generation_gateway,
             ).as_runnable()
         )
         self.edge_extractor = (
@@ -257,6 +266,8 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
                 repair_attempts=repair_attempts,
                 usage_tracker=self.usage_tracker,
                 operation="local_edges",
+                artifact_store=self.model_artifact_store,
+                gateway=self.generation_gateway,
             ).as_runnable()
         )
         self.global_edge_extractor = (
@@ -268,6 +279,8 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
                 repair_attempts=repair_attempts,
                 usage_tracker=self.usage_tracker,
                 operation="global_edges",
+                artifact_store=self.model_artifact_store,
+                gateway=self.generation_gateway,
             ).as_runnable()
         )
         self.dedup_extractor = (
@@ -279,6 +292,8 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
                 repair_attempts=repair_attempts,
                 usage_tracker=self.usage_tracker,
                 operation="dedup",
+                artifact_store=self.model_artifact_store,
+                gateway=self.generation_gateway,
             ).as_runnable()
         )
         self.community_extractor = (
@@ -290,6 +305,8 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
                 repair_attempts=repair_attempts,
                 usage_tracker=self.usage_tracker,
                 operation="community",
+                artifact_store=self.model_artifact_store,
+                gateway=self.generation_gateway,
             ).as_runnable()
         )
 
@@ -347,6 +364,11 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
         self.brief_hash = brief.content_hash if brief else ""
         self._configure_profile_extractors()
 
+    def configure_model_artifacts(self, root: str | Path) -> None:
+        """Route structured-output evidence into the current run checkpoint."""
+        self.model_artifact_store = ModelArtifactStore(root)
+        self._configure_profile_extractors()
+
     def _create_empty_instance(self) -> "CourseKnowledgeGraph":
         return CourseKnowledgeGraph(
             llm_client=self.llm_client,
@@ -359,6 +381,7 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
             structured_output_mode=self.structured_output_mode,
             output_repair_attempts=self.output_repair_attempts,
             extraction_brief=self.extraction_brief,
+            generation_gateway=self.generation_gateway,
         )
 
     def extract_nodes(self, source_text: str) -> list[CourseNode]:

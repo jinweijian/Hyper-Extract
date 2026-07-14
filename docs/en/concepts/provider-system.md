@@ -1,6 +1,16 @@
 # Provider System
 
-Hyper-Extract supports three ways to connect to LLMs: **OpenAI**, **Alibaba Bailian**, and **local vLLM**. All use the same `create_client()` interface — only the first line changes.
+Hyper-Extract separates the provider transport from model capabilities. OpenAI Chat-compatible endpoints share one adapter, while each named Model Profile explicitly declares structured-output modes, token parameter mapping, reasoning layout, embedding limits, and recovery budgets. Compatibility is based on a validated Profile or Probe result, not on a provider or model name guess.
+
+The conservative `openai-compatible-default` profile reads `OPENAI_MODEL`, `OPENAI_BASE_URL`, and `OPENAI_API_KEY` and enables `text_json` only. Embeddings use the independent `EMBEDDING_*` route.
+
+```bash
+he model validate --profile openai-compatible-default
+he model show --profile openai-compatible-default
+he model probe --profile production-profile --file model-profiles.toml
+```
+
+`validate` is local-only. `probe` performs small real requests and caches evidence under `~/.he/probes/`; profiles with `probe_required = true` cannot start without current successful evidence.
 
 ---
 

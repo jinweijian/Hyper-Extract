@@ -20,6 +20,16 @@ def test_settings_reject_relative_exchange_root(monkeypatch):
         ServiceSettings.from_env()
 
 
+def test_settings_reject_multiple_workers_without_shared_rate_limit_state(
+    monkeypatch,
+):
+    monkeypatch.setenv("HE_SERVICE_DATABASE_URL", "sqlite+pysqlite:///:memory:")
+    monkeypatch.setenv("HE_SERVICE_EXCHANGE_ROOT", "/exchange")
+    monkeypatch.setenv("HE_SERVICE_WORKER_PROCESSES", "2")
+    with pytest.raises(ValueError, match="must be 1"):
+        ServiceSettings.from_env()
+
+
 def test_settings_drops_unused_retention_and_cleanup_fields(monkeypatch):
     # No cleanup process consumes these, so they must not be exposed as active
     # configuration. Operators who set the env vars must not believe they take

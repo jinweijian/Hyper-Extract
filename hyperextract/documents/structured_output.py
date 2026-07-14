@@ -1,15 +1,31 @@
-"""Provider-neutral structured output invocation and defensive JSON parsing."""
+"""Provider-neutral structured output invocation and item-level quarantine."""
 
 from __future__ import annotations
 
 import json
-import re
+import threading
 import time
-from typing import Any, Callable, Literal, TypeVar
+import uuid
+from typing import Any, Callable, Literal, TypeVar, get_args, get_origin
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableLambda
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
+
+from hyperextract.providers.contracts import (
+    GenerationRequest,
+    ModelMessage,
+    RejectedItem,
+    ValidationSummary,
+)
+from hyperextract.providers.gateway import ModelExecutionGateway
+from hyperextract.providers.artifacts import ModelArtifactStore
+from hyperextract.providers.normalization import (
+    NormalizationError,
+    TruncatedJSONError,
+    extract_json_value as _extract_json_value,
+    normalize_generation_payload,
+)
 
 from .model_errors import (
     OutputTruncatedError,
@@ -19,98 +35,41 @@ from .model_errors import (
 )
 from .model_usage import ModelUsageTracker
 
-
 T = TypeVar("T", bound=BaseModel)
 OutputMode = Literal["auto", "native", "tool", "json_object", "text_json"]
-_THINKING = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.IGNORECASE | re.DOTALL)
-_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
-
-
-def _balanced_json(text: str) -> str | None:
-    start = next((index for index, char in enumerate(text) if char in "[{"), None)
-    if start is None:
-        return None
-    stack: list[str] = []
-    in_string = False
-    escaped = False
-    pairs = {"}": "{", "]": "["}
-    for index in range(start, len(text)):
-        char = text[index]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-        elif char in "[{":
-            stack.append(char)
-        elif char in "}]":
-            if not stack or stack[-1] != pairs[char]:
-                return None
-            stack.pop()
-            if not stack:
-                return text[start : index + 1]
-    raise OutputTruncatedError("Model returned truncated JSON")
 
 
 def extract_json_value(text: str) -> Any:
-    """Extract the first complete JSON object or array from a chat response."""
-    cleaned = _THINKING.sub("", text).strip()
-    fence = _FENCE.search(cleaned)
-    if fence:
-        cleaned = fence.group(1).strip()
-    candidate = _balanced_json(cleaned)
-    if candidate is None:
-        raise OutputValidationError("Model response contains no JSON object or array")
+    """Compatibility export for the shared response normalizer."""
     try:
-        return json.loads(candidate)
-    except json.JSONDecodeError as error:
+        return _extract_json_value(text)
+    except TruncatedJSONError as error:
+        raise OutputTruncatedError(str(error), original=error) from error
+    except NormalizationError as error:
         raise OutputValidationError(
-            f"Invalid JSON response: {error}", original=error
+            str(error), original=error, raw_response=text
         ) from error
 
 
 def _message_text(response: Any) -> str:
-    if isinstance(response, str):
-        return response
-    content = (
-        response.content
-        if isinstance(response, AIMessage)
-        else getattr(response, "content", None)
-    )
-    response_metadata = getattr(response, "response_metadata", {}) or {}
+    metadata = getattr(response, "response_metadata", {}) or {}
     finish_reason = str(
-        response_metadata.get("finish_reason")
-        or response_metadata.get("stop_reason")
-        or ""
+        metadata.get("finish_reason") or metadata.get("stop_reason") or ""
     ).lower()
+    if not finish_reason:
+        finish_reason = str(getattr(response, "finish_reason", "") or "").lower()
     if finish_reason in {"length", "max_tokens", "max_output_tokens"}:
         raise OutputTruncatedError(
             f"Model output was truncated: finish_reason={finish_reason}"
         )
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict) and item.get("type") in {
-                None,
-                "text",
-                "output_text",
-            }:
-                parts.append(str(item.get("text") or item.get("content") or ""))
-        return "\n".join(filter(None, parts))
-    raise OutputValidationError("Model response does not contain final text content")
+    try:
+        return normalize_generation_payload(response).final_text
+    except NormalizationError as error:
+        raise OutputValidationError(str(error), original=error) from error
 
 
 class StructuredOutputInvoker:
-    """Invoke one schema through native or plain-JSON provider capabilities."""
+    """Invoke one schema with bounded repair and auditable partial success."""
 
     def __init__(
         self,
@@ -122,6 +81,13 @@ class StructuredOutputInvoker:
         raw_response_sink: Callable[[str], None] | None = None,
         usage_tracker: ModelUsageTracker | None = None,
         operation: str = "structured_output",
+        gateway: ModelExecutionGateway | None = None,
+        invalid_item_policy: Literal["quarantine", "fail"] = "quarantine",
+        invalid_item_ratio_threshold: float = 0.2,
+        rejection_sink: Callable[[RejectedItem], None] | None = None,
+        validation_sink: Callable[[ValidationSummary], None] | None = None,
+        request_metadata: dict[str, str] | None = None,
+        artifact_store: ModelArtifactStore | None = None,
     ) -> None:
         self.model = model
         self.schema = schema
@@ -130,27 +96,233 @@ class StructuredOutputInvoker:
         self.raw_response_sink = raw_response_sink
         self.usage_tracker = usage_tracker
         self.operation = operation
+        self.gateway = gateway
+        self.invalid_item_policy = invalid_item_policy
+        self.invalid_item_ratio_threshold = invalid_item_ratio_threshold
+        self.rejection_sink = rejection_sink
+        self.validation_sink = validation_sink
+        self.request_metadata = request_metadata or {}
+        self.artifact_store = artifact_store
+        self._local = threading.local()
         self.last_mode: OutputMode | None = None
+        self.last_validation_summary: ValidationSummary | None = None
+        self._request_id = ""
+        self._last_raw_text = ""
+
+    @property
+    def last_mode(self) -> OutputMode | None:
+        return getattr(self._local, "last_mode", None)
+
+    @last_mode.setter
+    def last_mode(self, value: OutputMode | None) -> None:
+        self._local.last_mode = value
+
+    @property
+    def last_validation_summary(self) -> ValidationSummary | None:
+        return getattr(self._local, "last_validation_summary", None)
+
+    @last_validation_summary.setter
+    def last_validation_summary(self, value: ValidationSummary | None) -> None:
+        self._local.last_validation_summary = value
+
+    @property
+    def _request_id(self) -> str:
+        return getattr(self._local, "request_id", "")
+
+    @_request_id.setter
+    def _request_id(self, value: str) -> None:
+        self._local.request_id = value
+
+    @property
+    def _last_raw_text(self) -> str:
+        return getattr(self._local, "last_raw_text", "")
+
+    @_last_raw_text.setter
+    def _last_raw_text(self, value: str) -> None:
+        self._local.last_raw_text = value
 
     def as_runnable(self) -> RunnableLambda:
         return RunnableLambda(self.invoke)
 
     def _validate(self, response: Any) -> T:
         if isinstance(response, self.schema):
+            self._emit_summary(valid=1, rejected=[])
             return response
         if isinstance(response, dict):
             value = response
+            self._last_raw_text = json.dumps(response, ensure_ascii=False, default=str)
         else:
             text = _message_text(response)
+            self._last_raw_text = text
             if self.raw_response_sink:
                 self.raw_response_sink(text)
+            if self.artifact_store:
+                self.artifact_store.save_raw_response(self._request_id, text)
             value = extract_json_value(text)
+
+        result, rejections = self._validate_with_quarantine(value)
+        if rejections:
+            total = self._count_list_items(value)
+            ratio = len(rejections) / max(1, total)
+            if (
+                self.invalid_item_policy == "fail"
+                or ratio > self.invalid_item_ratio_threshold
+            ):
+                final_action = (
+                    "failed"
+                    if self.invalid_item_policy == "fail" or self.repair_attempts <= 0
+                    else "repaired"
+                )
+                rejections = [
+                    rejection.model_copy(update={"action": final_action})
+                    for rejection in rejections
+                ]
+                for rejection in rejections:
+                    if self.rejection_sink:
+                        self.rejection_sink(rejection)
+                    if self.artifact_store:
+                        self.artifact_store.save_rejection(rejection)
+                self._emit_summary(
+                    valid=max(0, total - len(rejections)),
+                    rejected=rejections,
+                    failed=True,
+                )
+                raise OutputValidationError(
+                    f"Structured output rejected {len(rejections)}/{total} list items",
+                    raw_response=self._last_raw_text,
+                    rejections=rejections,
+                )
+            for rejection in rejections:
+                if self.rejection_sink:
+                    self.rejection_sink(rejection)
+                if self.artifact_store:
+                    self.artifact_store.save_rejection(rejection)
+        self._emit_summary(
+            valid=max(1, self._count_list_items(value) - len(rejections)),
+            rejected=rejections,
+        )
+        return result
+
+    def _validate_with_quarantine(self, value: Any) -> tuple[T, list[RejectedItem]]:
+        if not isinstance(value, dict):
+            try:
+                return self.schema.model_validate(value), []
+            except ValidationError as error:
+                raise OutputValidationError(
+                    f"Structured output validation failed: {error}",
+                    original=error,
+                    raw_response=self._last_raw_text,
+                ) from error
+
+        cleaned = dict(value)
+        rejections: list[RejectedItem] = []
+        for field_name, field in self.schema.model_fields.items():
+            annotation = field.annotation
+            if get_origin(annotation) is not list or field_name not in cleaned:
+                continue
+            raw_items = cleaned[field_name]
+            if not isinstance(raw_items, list):
+                continue
+            item_type = get_args(annotation)[0]
+            adapter = TypeAdapter(item_type)
+            valid_items = []
+            for index, raw_item in enumerate(raw_items):
+                try:
+                    valid_items.append(adapter.validate_python(raw_item))
+                except ValidationError as error:
+                    rejections.append(
+                        self._rejection(field_name, index, raw_item, error)
+                    )
+            cleaned[field_name] = valid_items
         try:
-            return self.schema.model_validate(value)
+            return self.schema.model_validate(cleaned), rejections
         except ValidationError as error:
             raise OutputValidationError(
-                f"Structured output validation failed: {error}", original=error
+                f"Structured output validation failed: {error}",
+                original=error,
+                raw_response=self._last_raw_text,
+                rejections=rejections,
             ) from error
+
+    def _rejection(
+        self,
+        field_name: str,
+        index: int,
+        raw_item: Any,
+        error: ValidationError,
+    ) -> RejectedItem:
+        first = error.errors()[0] if error.errors() else {}
+        suffix = ".".join(str(part) for part in first.get("loc", ()))
+        schema_path = f"{field_name}.{index}" + (f".{suffix}" if suffix else "")
+        return RejectedItem(
+            request_id=self._request_id,
+            stage=self.operation,
+            chunk_id=self.request_metadata.get("chunk_id"),
+            batch_id=self.request_metadata.get("batch_id"),
+            schema_path=schema_path,
+            raw_item=raw_item,
+            error=str(first.get("msg") or error),
+            profile_fingerprint=self.request_metadata.get("profile_fingerprint"),
+            model_fingerprint=self.request_metadata.get("model_fingerprint"),
+            prompt_fingerprint=self.request_metadata.get("prompt_fingerprint"),
+        )
+
+    def _emit_summary(
+        self,
+        *,
+        valid: int,
+        rejected: list[RejectedItem],
+        failed: bool = False,
+    ) -> None:
+        affected: dict[str, int] = {}
+        unknown: list[str] = []
+        for rejection in rejected:
+            item = rejection.raw_item if isinstance(rejection.raw_item, dict) else {}
+            for key in ("source", "target"):
+                endpoint = item.get(key) if isinstance(item, dict) else None
+                if endpoint:
+                    affected[str(endpoint)] = affected.get(str(endpoint), 0) + 1
+                elif key in rejection.schema_path:
+                    unknown.append(f"{rejection.schema_path}: missing {key}")
+        total = valid + len(rejected)
+        summary = ValidationSummary(
+            request_id=self._request_id,
+            status=(
+                "failed"
+                if failed
+                else "completed_with_rejections"
+                if rejected
+                else "completed"
+            ),
+            valid_items=valid,
+            rejected_items=len(rejected),
+            rejected_ratio=len(rejected) / max(1, total),
+            affected_endpoints=affected,
+            unknown_endpoints=unknown,
+            connectivity_warnings=(
+                [
+                    "Quarantined relationships may introduce isolated nodes or "
+                    "additional connected components"
+                ]
+                if rejected
+                else []
+            ),
+            graph_connectivity_incomplete=bool(rejected),
+        )
+        self.last_validation_summary = summary
+        if self.validation_sink:
+            self.validation_sink(summary)
+        if self.artifact_store:
+            self.artifact_store.save_validation(summary)
+
+    def _count_list_items(self, value: Any) -> int:
+        if not isinstance(value, dict):
+            return 0
+        return sum(
+            len(item)
+            for name, item in value.items()
+            if name in self.schema.model_fields and isinstance(item, list)
+        )
 
     def _plain_prompt(self, prompt: Any, *, repair: str = "") -> Any:
         schema = json.dumps(self.schema.model_json_schema(), ensure_ascii=False)
@@ -160,7 +332,11 @@ class StructuredOutputInvoker:
             f"JSON Schema: {schema}"
         )
         if repair:
-            instruction += f"\nThe previous response was invalid. Repair it:\n{repair}"
+            instruction += (
+                "\nThe previous response was invalid. Repair the exact JSON below; "
+                "do not invent missing factual endpoints.\n"
+                f"Invalid response: {repair}"
+            )
         if hasattr(prompt, "to_messages"):
             return [*prompt.to_messages(), HumanMessage(content=instruction)]
         if isinstance(prompt, list):
@@ -171,7 +347,27 @@ class StructuredOutputInvoker:
         started = time.monotonic()
         response: Any = None
         try:
-            if mode == "native":
+            if self.gateway is not None:
+                response = self.gateway.invoke(
+                    GenerationRequest(
+                        operation=self.operation,
+                        messages=_to_model_messages(self._plain_prompt(prompt)),
+                        output_schema=self.schema.model_json_schema(),
+                        structured_output=True,
+                        structured_output_mode=mode,
+                        request_id=self._request_id,
+                        metadata={
+                            **self.request_metadata,
+                            "schema_name": self.schema.__name__,
+                        },
+                    )
+                )
+                self.last_mode = (
+                    self.gateway.last_trace.modes[-1]
+                    if self.gateway.last_trace.modes
+                    else mode
+                )
+            elif mode == "native":
                 response = self.model.with_structured_output(
                     self.schema, method="json_schema"
                 ).invoke(prompt)
@@ -186,43 +382,40 @@ class StructuredOutputInvoker:
             else:
                 response = self.model.invoke(self._plain_prompt(prompt))
             result = self._validate(response)
-            self.last_mode = mode
-            if self.usage_tracker:
-                self.usage_tracker.record(
-                    operation=self.operation,
-                    mode=mode,
-                    prompt=prompt,
-                    schema=self.schema.model_json_schema(),
-                    response=response,
-                    elapsed_seconds=time.monotonic() - started,
-                )
+            self.last_mode = self.last_mode or mode
+            self._record(prompt, response, mode, started)
             return result
         except (OutputTruncatedError, OutputValidationError) as error:
-            if self.usage_tracker:
-                self.usage_tracker.record(
-                    operation=self.operation,
-                    mode=mode,
-                    prompt=prompt,
-                    schema=self.schema.model_json_schema(),
-                    response=response,
-                    elapsed_seconds=time.monotonic() - started,
-                    error=error,
-                )
+            self._record(prompt, response, mode, started, error=error)
             raise
         except Exception as error:
-            if self.usage_tracker:
-                self.usage_tracker.record(
-                    operation=self.operation,
-                    mode=mode,
-                    prompt=prompt,
-                    schema=self.schema.model_json_schema(),
-                    response=response,
-                    elapsed_seconds=time.monotonic() - started,
-                    error=error,
-                )
+            self._record(prompt, response, mode, started, error=error)
             raise classify_model_error(error) from error
 
+    def _record(
+        self,
+        prompt: Any,
+        response: Any,
+        mode: str,
+        started: float,
+        *,
+        error: Exception | None = None,
+        repair: bool = False,
+    ) -> None:
+        if self.usage_tracker:
+            self.usage_tracker.record(
+                operation=self.operation,
+                mode=mode,
+                prompt=prompt,
+                schema=self.schema.model_json_schema(),
+                response=response,
+                elapsed_seconds=time.monotonic() - started,
+                error=error,
+                repair=repair,
+            )
+
     def invoke(self, prompt: Any) -> T:
+        self._request_id = self.request_metadata.get("request_id") or uuid.uuid4().hex
         modes: tuple[OutputMode, ...] = (
             ("native", "tool", "text_json") if self.mode == "auto" else (self.mode,)
         )
@@ -234,52 +427,96 @@ class StructuredOutputInvoker:
                 last_error = error
                 continue
             except OutputTruncatedError:
-                # Repeating the same prompt cannot recover a provider length cutoff.
-                # The caller must reduce the requested batch or input size.
                 raise
             except OutputValidationError as error:
                 last_error = error
-                if self.repair_attempts <= 0:
-                    raise
-                try:
-                    raw = str(error)
-                    repair_prompt = self._plain_prompt(prompt, repair=raw)
+                invalid = error.raw_response or self._last_raw_text or str(error)
+                for _ in range(self.repair_attempts):
+                    repair_prompt = self._plain_prompt(prompt, repair=invalid)
                     started = time.monotonic()
                     response = None
                     try:
-                        response = self.model.invoke(repair_prompt)
-                        result = self._validate(response)
-                    except Exception as repair_error:
-                        if self.usage_tracker:
-                            self.usage_tracker.record(
-                                operation=self.operation,
-                                mode="text_json",
-                                prompt=repair_prompt,
-                                schema=self.schema.model_json_schema(),
-                                response=response,
-                                elapsed_seconds=time.monotonic() - started,
-                                error=repair_error,
-                                repair=True,
+                        if self.gateway is not None:
+                            response = self.gateway.invoke(
+                                GenerationRequest(
+                                    operation=f"{self.operation}.repair",
+                                    messages=_to_model_messages(repair_prompt),
+                                    output_schema=self.schema.model_json_schema(),
+                                    structured_output=True,
+                                    structured_output_mode="text_json",
+                                    request_id=self._request_id,
+                                    metadata={
+                                        **self.request_metadata,
+                                        "repair": "true",
+                                    },
+                                )
                             )
-                        raise
-                    if self.usage_tracker:
-                        self.usage_tracker.record(
-                            operation=self.operation,
-                            mode="text_json",
-                            prompt=repair_prompt,
-                            schema=self.schema.model_json_schema(),
-                            response=response,
-                            elapsed_seconds=time.monotonic() - started,
+                        else:
+                            response = self.model.invoke(repair_prompt)
+                        result = self._validate(response)
+                        self._record(
+                            repair_prompt,
+                            response,
+                            "text_json",
+                            started,
                             repair=True,
                         )
-                    self.last_mode = "text_json"
-                    return result
-                except Exception as repair_error:
-                    if isinstance(
-                        repair_error, (OutputValidationError, OutputTruncatedError)
-                    ):
-                        raise repair_error
-                    raise classify_model_error(repair_error) from repair_error
+                        self.last_mode = "text_json"
+                        return result
+                    except OutputTruncatedError:
+                        raise
+                    except OutputValidationError as repair_error:
+                        last_error = repair_error
+                        invalid = (
+                            repair_error.raw_response
+                            or self._last_raw_text
+                            or str(repair_error)
+                        )
+                        self._record(
+                            repair_prompt,
+                            response,
+                            "text_json",
+                            started,
+                            error=repair_error,
+                            repair=True,
+                        )
+                        continue
+                    except Exception as repair_error:
+                        classified = classify_model_error(repair_error)
+                        self._record(
+                            repair_prompt,
+                            response,
+                            "text_json",
+                            started,
+                            error=classified,
+                            repair=True,
+                        )
+                        raise classified from repair_error
+                if isinstance(last_error, OutputValidationError):
+                    for rejection in last_error.rejections:
+                        failed = rejection.model_copy(update={"action": "failed"})
+                        if self.rejection_sink:
+                            self.rejection_sink(failed)
+                        if self.artifact_store:
+                            self.artifact_store.save_rejection(failed)
+                raise last_error
         if last_error is not None:
             raise last_error
         raise OutputValidationError("No structured output mode was attempted")
+
+
+def _to_model_messages(prompt: Any) -> list[ModelMessage]:
+    if hasattr(prompt, "to_messages"):
+        prompt = prompt.to_messages()
+    if not isinstance(prompt, list):
+        return [ModelMessage(role="user", content=str(prompt))]
+    result: list[ModelMessage] = []
+    for message in prompt:
+        role_name = getattr(message, "type", None) or getattr(message, "role", "user")
+        role = {"human": "user", "ai": "assistant"}.get(role_name, role_name)
+        if role not in {"system", "user", "assistant"}:
+            role = "user"
+        result.append(
+            ModelMessage(role=role, content=str(getattr(message, "content", message)))
+        )
+    return result

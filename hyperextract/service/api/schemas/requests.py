@@ -25,7 +25,7 @@ class RunBudget(StrictModel):
 
 
 class RunExecution(StrictModel):
-    model_profile: str = "minimax-course-default"
+    model_profile: str = "openai-compatible-default"
     context_policy: Literal["auto", "preserve", "repack"] = "auto"
     priority: Literal["normal", "low"] = "normal"
     budget: RunBudget = Field(default_factory=RunBudget)

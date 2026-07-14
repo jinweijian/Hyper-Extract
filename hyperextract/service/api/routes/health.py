@@ -18,7 +18,7 @@ router = APIRouter()
 
 # The profile the API validates during readiness. It must match the Worker's
 # default profile so both processes agree on the secret-free fingerprint.
-DEFAULT_PROFILE_NAME = "minimax-course-default"
+DEFAULT_PROFILE_NAME = "openai-compatible-default"
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
 

@@ -14,8 +14,17 @@ from hyperextract.providers.contracts import (
     ModelMessage,
     OutputMode,
     ProfileConfigurationError,
+    ProbeResult,
+    RejectedItem,
     RecoveryDecision,
+    ValidationSummary,
 )
+from hyperextract.providers.gateway import (
+    GatewayExecutionError,
+    ModelExecutionGateway,
+)
+from hyperextract.providers.probe import CapabilityProbe, ProbeStore
+from hyperextract.providers.recovery import RecoveryPolicy, RecoveryState
 from hyperextract.providers.profiles import (
     ModelProfile,
     ProfileCapabilities,
@@ -34,16 +43,25 @@ __all__ = [
     "EmbeddingResponse",
     "GenerationRequest",
     "GenerationResponse",
+    "GatewayExecutionError",
     "ModelCapabilities",
     "ModelMessage",
+    "ModelExecutionGateway",
     "ModelProfile",
     "OutputMode",
     "ProfileCapabilities",
     "ProfileConfigurationError",
+    "ProbeResult",
+    "ProbeStore",
+    "CapabilityProbe",
+    "RejectedItem",
     "ProfileEmbeddingCapabilities",
     "ProfileRecovery",
     "ProviderRegistry",
     "RecoveryDecision",
+    "RecoveryPolicy",
+    "RecoveryState",
+    "ValidationSummary",
     "load_profile",
     "load_profiles_from_toml",
 ]

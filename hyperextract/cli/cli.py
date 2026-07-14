@@ -27,7 +27,7 @@ from .config import (
     load_ka_metadata,
 )
 
-from .commands import config_app, evaluate_app, list_app, profile_app
+from .commands import config_app, evaluate_app, list_app, model_app, profile_app
 
 console = Console()
 logger = get_logger("he")
@@ -43,6 +43,7 @@ app.add_typer(list_app, name="list")
 app.add_typer(config_app, name="config")
 app.add_typer(profile_app, name="profile")
 app.add_typer(evaluate_app, name="evaluate")
+app.add_typer(model_app, name="model")
 
 
 @app.callback()

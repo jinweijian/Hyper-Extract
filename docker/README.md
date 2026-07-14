@@ -81,7 +81,7 @@ Copy `.env.example` to `.env` and fill in real values:
 ```sh
 cp docker/.env.example docker/.env
 # edit docker/.env — set POSTGRES_PASSWORD and add provider secrets for the Worker:
-#   MIMIMAX_API_KEY=...
+#   MINIMAX_API_KEY=...
 #   EMBEDDING_API_KEY=...
 ```
 
@@ -146,22 +146,19 @@ container is force-killed. Lease renewal continues while an in-flight call is
 draining, then stops when the Worker exits; another replica can recover the
 run after the final lease expires.
 
-## Scaling Workers
+## Worker count and provider quotas
 
-Workers claim runs from PostgreSQL with `SELECT ... FOR UPDATE SKIP LOCKED` and
-renew leases independently, so replicas share the database and `/exchange`
-without duplicate work:
-
-```sh
-docker compose --env-file docker/.env -f docker/service.compose.yml \
-  up -d --scale he-worker=3
-```
+Run exactly one Worker process until a shared PostgreSQL/Redis rate-limit-group
+coordinator is configured. Database leases prevent duplicate run ownership, but
+they do not coordinate provider concurrency, RPM/TPM pause windows, or circuit
+breaker state. `HE_SERVICE_WORKER_PROCESSES` therefore rejects values other than
+`1`; do not use Compose `--scale` for Workers in this release.
 
 Crashed Workers' expired leases are requeued with `resume_from_checkpoint=true`
 up to a bounded recovery count. Every progress, failure, cancellation,
 publication and completion transition verifies the live lease owner under a
 database row lock, so a stale Worker cannot overwrite a replacement Worker.
-Do not set `container_name` on scaled services.
+Do not set `container_name` on the Worker service.
 
 ## Destructive operations — read carefully
 
@@ -206,7 +203,7 @@ The deterministic smoke test never calls a model. Before a real release,
 perform this manual acceptance once against a small package:
 
 1. Inject the Worker's real provider keys into `docker/.env`
-   (`MIMIMAX_API_KEY`, `EMBEDDING_API_KEY`).
+   (`MINIMAX_API_KEY`, `EMBEDDING_API_KEY`).
 2. Publish one small immutable Document Package `1.1` (with a Brief) to
    `/exchange/packages/<name>.hepkg/`.
 3. `POST /v1/document-packages/validate` with `contract_version: "1.1"` and the

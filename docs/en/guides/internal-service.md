@@ -53,7 +53,7 @@ curl -X POST http://he-api:8000/v1/runs \
   -d '{
     "input":{"type":"document_package","contract_version":"1.1","package_uri":"file:///exchange/packages/course.hepkg/","package_format":"directory","sha256":"<canonical-fingerprint>"},
     "pipeline":{"name":"course_graph","profile":{"name":"course_knowledge_graph","version":"1"}},
-    "execution":{"model_profile":"minimax-course-default","context_policy":"auto","priority":"normal"}
+    "execution":{"model_profile":"openai-compatible-default","context_policy":"auto","priority":"normal"}
   }'
 ```
 

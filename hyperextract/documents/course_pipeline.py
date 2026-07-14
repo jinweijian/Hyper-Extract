@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
-import random
 import re
 import signal
 import time
@@ -30,6 +30,9 @@ from hyperextract.methods.rag.course_knowledge_graph import (
     stable_node_id,
 )
 from hyperextract.profiles.course import CourseExtractionProfile, load_course_profile
+from hyperextract.providers.contracts import CanonicalModelFailure
+from hyperextract.providers.profiles import ProfileRecovery
+from hyperextract.providers.recovery import RecoveryPolicy, RecoveryState
 
 from .checkpoint import RunCheckpoint, atomic_write_json, atomic_write_text, fingerprint
 from .context_planner import ContextBudget, ContextBudgetError
@@ -163,10 +166,6 @@ def _migrate_compatible_profile_checkpoint(
     atomic_write_json(manifest_path, existing)
 
 
-def _is_retryable(error: Exception) -> bool:
-    return classify_model_error(error).retryable
-
-
 def _is_size_error(error: Exception) -> bool:
     return isinstance(
         error,
@@ -184,8 +183,16 @@ def _retry(
     heartbeat_interval: int,
     chunk_id: str | None = None,
 ) -> T:
-    last_error: Exception | None = None
-    for attempt in range(1, max(1, attempts) + 1):
+    state = RecoveryState()
+    policy = RecoveryPolicy(
+        ProfileRecovery(
+            transient_retry_attempts=max(0, attempts - 1),
+            validation_repair_attempts=0,
+            validation_retry_attempts=0,
+        )
+    )
+    attempt = 1
+    while True:
         try:
             with checkpoint.heartbeat(
                 stage,
@@ -196,20 +203,51 @@ def _retry(
                 return operation()
         except Exception as error:
             classified = classify_model_error(error)
-            last_error = classified
-            if attempt >= attempts or not classified.retryable:
+            failure = _canonical_pipeline_failure(
+                classified,
+                request_id=f"{stage}:{chunk_id or 'run'}:{attempt}",
+            )
+            decision = policy.decide(failure, state)
+            if decision.action != "retry":
                 raise classified from error
-            delay = min(60.0, 5.0 * (3 ** (attempt - 1))) + random.random()
+            if failure.category.startswith("rate_limit."):
+                state.rate_limit_attempts += 1
+            else:
+                state.transient_attempts += 1
+            attempt += 1
             checkpoint.emit(
                 stage,
                 "retrying",
-                f"{message}失败，{delay:.1f}s 后重试：{classified.category}: {classified}",
+                f"{message}失败，{decision.delay_seconds:.1f}s 后重试："
+                f"{classified.category}: {classified}",
                 chunk_id=chunk_id,
-                attempt=attempt + 1,
+                attempt=attempt,
+                recovery_action=decision.action,
+                recovery_target=decision.target,
+                recovery_reason=decision.reason,
             )
-            time.sleep(delay)
-    assert last_error is not None
-    raise last_error
+            time.sleep(decision.delay_seconds)
+
+
+def _canonical_pipeline_failure(
+    error: Exception, *, request_id: str
+) -> CanonicalModelFailure:
+    category = getattr(error, "category", "model_error")
+    mapped = {
+        "rate_limit": "rate_limit.requests",
+        "unsupported_capability": "unsupported_capability",
+        "authentication": "authentication",
+        "context_window": "context_window",
+        "output_truncated": "output_truncated",
+        "output_validation": "output_validation",
+        "transient": "transient",
+    }.get(category, "unknown")
+    return CanonicalModelFailure(
+        request_id=request_id,
+        category=mapped,
+        reason=category,
+        raw_message=str(error),
+    )
 
 
 def _render_budgeted_context(
@@ -1285,6 +1323,16 @@ def run_course_document(
     profile_version = str(getattr(ka, "profile_version", COURSE_PROFILE_VERSION))
     profile_hash = str(getattr(ka, "profile_hash", "builtin"))
     prompt_hash = str(getattr(ka, "prompt_hash", "builtin"))
+    output_schema_fingerprint = fingerprint(
+        {
+            "node": CourseNode.model_json_schema(),
+            "edge": CourseEdge.model_json_schema(),
+            "chunk": CourseChunkResult.model_json_schema(),
+            "global_edges": CourseEdgeList.model_json_schema(),
+            "dedup": DedupDecision.model_json_schema(),
+            "community": CommunityReport.model_json_schema(),
+        }
+    )
     config = {
         **options.__dict__,
         "method": "course_knowledge_graph",
@@ -1302,6 +1350,13 @@ def run_course_document(
             "HYPER_EXTRACT_STRUCTURED_OUTPUT_MODE", "auto"
         ),
         "embedder_model": str(embed_model or "unknown"),
+        "model_profile_fingerprint": str(getattr(ka, "model_profile_fingerprint", "")),
+        "capability_fingerprint": str(getattr(ka, "capability_fingerprint", "")),
+        "adapter_name": str(getattr(ka, "adapter_name", "legacy-langchain")),
+        "adapter_version": str(getattr(ka, "adapter_version", "1")),
+        "normalizer_version": "1",
+        "recovery_policy_version": "1",
+        "output_schema_fingerprint": output_schema_fingerprint,
     }
     if extraction_brief is not None:
         config.update(
@@ -1326,6 +1381,12 @@ def run_course_document(
         run_id=control.run_id if control else None,
         event_sink=control.event_sink if control else None,
     )
+    configure_artifacts = getattr(ka, "configure_model_artifacts", None)
+    if callable(configure_artifacts):
+        configure_artifacts(checkpoint.root)
+    probe_evidence = getattr(ka, "probe_evidence", None)
+    if probe_evidence:
+        checkpoint.update(probe_evidence=probe_evidence)
     if extraction_brief is not None:
         normalized_brief = extraction_brief.model_dump(mode="json")
         atomic_write_json(
@@ -1708,6 +1769,7 @@ def run_course_document(
             or {"count": 0}
         ).get("count", 0)
         wall_elapsed_seconds = round(time.monotonic() - started, 2)
+        rejection_summary = _run_rejection_summary(checkpoint.root)
         performance_report = build_performance_report(
             model_usage,
             wall_elapsed_seconds=wall_elapsed_seconds,
@@ -1731,7 +1793,11 @@ def run_course_document(
         atomic_write_json(output / "cost-report.json", cost_report)
         summary = {
             "run_id": checkpoint.run_id,
-            "status": "completed",
+            "status": (
+                "completed_with_rejections"
+                if rejection_summary["quarantined"]
+                else "completed"
+            ),
             "input": str(source),
             "input_format": resolved_input_format,
             "output": str(output),
@@ -1757,6 +1823,7 @@ def run_course_document(
             ),
             "quality": quality,
             "model_usage": model_usage,
+            "structured_output": rejection_summary,
             "global_edge_candidates": global_edge_candidates,
             "reports": {
                 "quality": "quality-report.json",
@@ -1766,7 +1833,7 @@ def run_course_document(
             "elapsed_seconds": wall_elapsed_seconds,
         }
         atomic_write_json(output / "run-summary.json", summary)
-        checkpoint.update(status="completed", stage="completed", summary=summary)
+        checkpoint.update(status=summary["status"], stage="completed", summary=summary)
         checkpoint.emit(
             "finalize",
             "completed",
@@ -1798,3 +1865,38 @@ def run_course_document(
     finally:
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
+
+
+def _run_rejection_summary(root: Path) -> dict[str, Any]:
+    counts = {"total": 0, "quarantined": 0, "repaired": 0, "failed": 0}
+    affected: dict[str, int] = {}
+    rejection_root = root / "rejections"
+    if not rejection_root.exists():
+        return {
+            **counts,
+            "affected_endpoints": affected,
+            "graph_connectivity_incomplete": False,
+        }
+    for path in rejection_root.glob("*.jsonl"):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            action = str(item.get("action") or "failed")
+            counts["total"] += 1
+            if action in counts:
+                counts[action] += 1
+            raw = item.get("raw_item")
+            if isinstance(raw, dict):
+                for key in ("source", "target"):
+                    endpoint = raw.get(key)
+                    if endpoint:
+                        affected[str(endpoint)] = affected.get(str(endpoint), 0) + 1
+    return {
+        **counts,
+        "affected_endpoints": affected,
+        "graph_connectivity_incomplete": counts["quarantined"] > 0,
+    }

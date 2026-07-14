@@ -38,14 +38,40 @@ class OutputTruncatedError(ModelInvocationError):
 
 
 class OutputValidationError(ModelInvocationError):
-    retryable = True
+    retryable = False
     category = "output_validation"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        original: Exception | None = None,
+        raw_response: str | None = None,
+        rejections: list | None = None,
+    ) -> None:
+        super().__init__(message, original=original)
+        self.raw_response = raw_response
+        self.rejections = rejections or []
 
 
 def classify_model_error(error: Exception) -> ModelInvocationError:
     """Map provider-specific exceptions to pipeline-stable categories."""
     if isinstance(error, ModelInvocationError):
         return error
+    failure = getattr(error, "failure", None)
+    category = getattr(failure, "category", None)
+    if category == "authentication" or str(category).startswith("quota."):
+        return AuthenticationModelError(str(error), original=error)
+    if category in {"unsupported_capability", "unsupported_parameter"}:
+        return UnsupportedModelCapabilityError(str(error), original=error)
+    if str(category).startswith("rate_limit."):
+        return RateLimitModelError(str(error), original=error)
+    if category == "context_window":
+        return ContextWindowExceededError(str(error), original=error)
+    if category == "output_truncated":
+        return OutputTruncatedError(str(error), original=error)
+    if category == "transient":
+        return TransientModelError(str(error), original=error)
     text = f"{type(error).__name__}: {error}".lower()
     status = getattr(error, "status_code", None)
     if status in {401, 403} or any(

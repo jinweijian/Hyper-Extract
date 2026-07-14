@@ -133,8 +133,8 @@ def test_model_errors_have_stable_categories(error, expected):
     assert isinstance(classify_model_error(error), expected)
 
 
-def test_output_validation_errors_are_retryable_for_fresh_model_output():
+def test_output_validation_errors_are_repaired_by_invoker_not_global_retry():
     error = OutputValidationError("missing target")
 
-    assert error.retryable is True
+    assert error.retryable is False
     assert classify_model_error(error) is error

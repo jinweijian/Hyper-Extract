@@ -28,21 +28,24 @@ def _load_env():
 _load_env()
 
 
-def _has_openai_key() -> bool:
-    """Check if OpenAI API key is available in environment."""
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    return bool(api_key and api_key != "sk-")
+def _real_api_explicitly_enabled() -> bool:
+    """Real calls require an explicit opt-in; credentials alone never enable them."""
+    return os.getenv("HYPER_EXTRACT_TEST_REAL_API", "").strip() == "1"
 
 
 @pytest.fixture(scope="session")
 def is_real_env() -> bool:
     """Fixture indicating whether tests should use real API or mock."""
-    has_key = _has_openai_key()
-    if has_key:
-        print("\n\n[PYTEST CONFIG] 🔌 Real OpenAI API detected - Using REAL LLM & Embeddings")
+    enabled = _real_api_explicitly_enabled()
+    if enabled:
+        if not os.getenv("OPENAI_API_KEY", "").strip():
+            pytest.fail("HYPER_EXTRACT_TEST_REAL_API=1 requires OPENAI_API_KEY")
+        print(
+            "\n\n[PYTEST CONFIG] 🔌 Real OpenAI API detected - Using REAL LLM & Embeddings"
+        )
     else:
         print("\n\n[PYTEST CONFIG] 🎭 No API key found - Using MOCK LLM & Embeddings")
-    return has_key
+    return enabled
 
 
 @pytest.fixture(scope="session")

@@ -201,7 +201,7 @@ def failed_run(repository, package_path, settings):
 
     class FakeProfiles:
         def public_descriptor(self, name):
-            if name != "minimax-course-default":
+            if name != "openai-compatible-default":
                 raise KeyError(name)
             return {"name": name, "fingerprint": "b" * 64}
 
@@ -223,7 +223,7 @@ def failed_run(repository, package_path, settings):
                 "name": "course_graph",
                 "profile": {"name": "course_knowledge_graph", "version": "1"},
             },
-            "execution": {"model_profile": "minimax-course-default"},
+            "execution": {"model_profile": "openai-compatible-default"},
         }
         response = api_client.post(
             "/v1/runs", headers={"Idempotency-Key": "failed"}, json=payload
@@ -248,7 +248,7 @@ def client(settings, repository):
 
     class FakeProfiles:
         def public_descriptor(self, name):
-            if name != "minimax-course-default":
+            if name != "openai-compatible-default":
                 raise KeyError(name)
             return {"name": name, "fingerprint": "b" * 64}
 

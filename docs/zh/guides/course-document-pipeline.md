@@ -37,7 +37,7 @@ uv run he parse ./book.hepkg \
   --no-index
 ```
 
-可用命名路由在同一 `.env` 中配置多个 OpenAI 兼容服务。例如设置 `HYPER_EXTRACT_LLM_PROFILE=MIMIMAX` 后，HE 会读取 `MIMIMAX_MODEL`、`MIMIMAX_API_KEY` 和 `MIMIMAX_BASE_URL`。Embedding 可独立设置 `HYPER_EXTRACT_EMBEDDING_PROFILE=EMBEDDING`。对于不支持原生 JSON Schema 的模型，使用 `HYPER_EXTRACT_STRUCTURED_OUTPUT_MODE=text_json` 避免自动能力探测产生额外请求。
+可在部署级 Profile TOML 中配置多个 OpenAI 兼容路由。例如显式 `minimax-m27` Profile 引用 `MINIMAX_API_KEY`，并声明模型、Base URL 和能力。Embedding 保持独立配置。对于不支持原生 JSON Schema 的模型，在 Profile 中只声明 `text_json`，避免生产请求进行隐式能力探测。
 
 不要在恢复任务时增加 `--force`。`--force` 会清空 `.he-run` 检查点并从头开始。输入文件、模型、提示词或关键切片参数发生变化时，流水线会拒绝复用不匹配的现场。
 

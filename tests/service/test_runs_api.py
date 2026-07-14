@@ -14,7 +14,7 @@ def request_body(package_path, version="1.0"):
             "name": "course_graph",
             "profile": {"name": "course_knowledge_graph", "version": "1"},
         },
-        "execution": {"model_profile": "minimax-course-default"},
+        "execution": {"model_profile": "openai-compatible-default"},
     }
 
 

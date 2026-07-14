@@ -30,6 +30,13 @@ def _estimate_tokens(value: Any) -> int:
 
 
 def _usage(response: Any) -> tuple[int | None, int | None]:
+    direct_input = getattr(response, "input_tokens", None)
+    direct_output = getattr(response, "output_tokens", None)
+    if direct_input is not None or direct_output is not None:
+        return (
+            int(direct_input) if direct_input is not None else None,
+            int(direct_output) if direct_output is not None else None,
+        )
     usage = getattr(response, "usage_metadata", None) or {}
     metadata = getattr(response, "response_metadata", None) or {}
     token_usage = metadata.get("token_usage") or metadata.get("usage") or {}

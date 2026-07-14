@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
+from hyperextract.providers.adapters.base import AdapterError
 from hyperextract.providers.contracts import (
     CanonicalModelFailure,
     EmbeddingCapabilities,
@@ -27,12 +28,8 @@ class EmbeddingProtocolError(ValueError):
         self.indices = indices or []
 
 
-class EmbeddingAdapterError(RuntimeError):
+class EmbeddingAdapterError(AdapterError):
     """Raised when the underlying provider call fails; carries a CanonicalModelFailure."""
-
-    def __init__(self, message: str, *, failure: CanonicalModelFailure) -> None:
-        super().__init__(message)
-        self.failure = failure
 
 
 class OpenAIEmbeddingAdapter:
@@ -48,12 +45,14 @@ class OpenAIEmbeddingAdapter:
         client: Any | None = None,
         max_retries: int = 2,
         encoding: Any | None = None,
+        warning_sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._model = model
         self._base_url = base_url
         self._api_key = api_key
         self._capabilities = capabilities
         self._max_retries = max_retries
+        self._warning_sink = warning_sink
         if client is not None:
             self._client = client
         else:
@@ -104,6 +103,7 @@ class OpenAIEmbeddingAdapter:
         saw_usage = False
         input_tokens_total = 0
         provider_request_id: str | None = None
+        validation_warnings: list[str] = []
         expected_dim: int | None = None
 
         for batch in batches:
@@ -113,10 +113,24 @@ class OpenAIEmbeddingAdapter:
                     f"Protocol error: expected {len(batch)} embeddings, "
                     f"got {len(response.data)} from provider"
                 )
-            for (payload, orig_idx, _), data_item in zip(
-                batch, response.data, strict=True
+            for position, ((payload, orig_idx, _), data_item) in enumerate(
+                zip(batch, response.data, strict=True)
             ):
+                provider_index = getattr(data_item, "index", position)
+                if provider_index != position:
+                    raise EmbeddingProtocolError(
+                        "Protocol error: embedding response order does not match "
+                        f"the request (position {position}, provider index "
+                        f"{provider_index})",
+                        indices=[orig_idx],
+                    )
                 vec = list(data_item.embedding)
+                if request.dimensions is not None and len(vec) != request.dimensions:
+                    raise EmbeddingProtocolError(
+                        "Protocol error: provider returned vector dimension "
+                        f"{len(vec)} instead of requested {request.dimensions}",
+                        indices=[orig_idx],
+                    )
                 if expected_dim is None:
                     expected_dim = len(vec)
                 elif len(vec) != expected_dim:
@@ -168,6 +182,19 @@ class OpenAIEmbeddingAdapter:
                     "zero vectors inserted for blank input indices %s",
                     blank_indices,
                 )
+                warning = (
+                    f"zero vectors inserted for blank input indices {blank_indices}"
+                )
+                validation_warnings.append(warning)
+                if self._warning_sink:
+                    self._warning_sink(
+                        {
+                            "request_id": request.request_id,
+                            "category": "embedding_zero_vector",
+                            "indices": blank_indices,
+                            "warning": warning,
+                        }
+                    )
 
         items: list[EmbeddingItemResult] = []
         for i in range(n):
@@ -200,6 +227,7 @@ class OpenAIEmbeddingAdapter:
             items=items,
             input_tokens=input_tokens_total if saw_usage else None,
             provider_request_id=provider_request_id,
+            validation_warnings=validation_warnings,
         )
 
     def _split_texts(
