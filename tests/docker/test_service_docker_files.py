@@ -129,6 +129,8 @@ def test_dev_override_binds_loopback_only_and_keeps_api_off_egress(dev_compose):
     assert len(ports) == 1
     assert ports[0].startswith("127.0.0.1:")
     assert "${HE_API_PORT:-8000}:8000" in ports[0]
+    assert "local-access" in api["networks"]
+    assert dev_compose["networks"]["local-access"] == {}
     # The development override must NOT attach the API to the egress network.
     assert "model-egress" not in api.get("networks", [])
 
