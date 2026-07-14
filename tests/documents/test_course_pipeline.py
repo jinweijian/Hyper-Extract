@@ -1,3 +1,4 @@
+import hashlib
 import json
 import threading
 from types import SimpleNamespace
@@ -25,7 +26,7 @@ from hyperextract.methods.rag.course_knowledge_graph import (
     CourseNode,
 )
 from hyperextract.profiles.course import load_course_profile
-from tests.documents.test_document_package import _write_package
+from tests.documents.test_document_package import _add_extraction_brief, _write_package
 from tests.documents.test_docling import _document
 from tests.mocks import MockEmbeddings
 
@@ -45,6 +46,19 @@ class FakeCourseGraph:
         self.extract_calls = 0
         self._lock = threading.Lock()
         self._graph = SimpleNamespace(nodes=[], edges=[])
+        self.applied_brief = None
+        self.prompt_snapshots = {}
+
+    def apply_extraction_brief(self, brief):
+        self.applied_brief = brief
+        self.brief_hash = brief.content_hash
+        self.prompt_hash = brief.content_hash
+        self.prompt_snapshots = {
+            "nodes": {
+                "system": f"Brief: {brief.metadata.id}",
+                "user": "{source_text}",
+            }
+        }
 
     def extract_nodes(self, source_text):
         with self._lock:
@@ -219,6 +233,79 @@ def test_course_pipeline_accepts_document_package_without_docling(tmp_path):
     assert graph.extract_calls == 1
 
 
+def test_course_pipeline_applies_and_snapshots_package_brief(tmp_path):
+    source = _add_extraction_brief(_write_package(tmp_path / "course.hepkg"))
+    output = tmp_path / "output"
+    graph = FakeCourseGraph()
+    options = PipelineOptions(
+        target_tokens=100,
+        max_tokens=200,
+        max_workers=1,
+        retry_attempts=1,
+        heartbeat_interval=1,
+        semantic_dedup=False,
+        community_reports=False,
+    )
+
+    run_course_document(
+        source,
+        output,
+        graph,
+        options=options,
+        input_format="document-package",
+    )
+
+    run = json.loads((output / ".he-run" / "run.json").read_text())
+    assert graph.applied_brief.metadata.id == "test-brief"
+    assert run["config"]["extraction_brief_hash"] == graph.applied_brief.content_hash
+    assert (output / ".he-run" / "extraction-brief.snapshot.yaml").exists()
+    assert (output / ".he-run" / "prompts" / "nodes.txt").exists()
+
+
+def test_course_pipeline_rejects_resume_after_brief_changes(tmp_path):
+    source = _add_extraction_brief(_write_package(tmp_path / "course.hepkg"))
+    output = tmp_path / "output"
+    options = PipelineOptions(
+        target_tokens=100,
+        max_tokens=200,
+        max_workers=1,
+        retry_attempts=1,
+        heartbeat_interval=1,
+        semantic_dedup=False,
+        community_reports=False,
+    )
+    run_course_document(
+        source,
+        output,
+        FakeCourseGraph(),
+        options=options,
+        input_format="document-package",
+    )
+
+    brief_path = source / "extraction-brief.yaml"
+    changed = brief_path.read_text().replace(
+        "Extract independently useful knowledge",
+        "Extract only explicitly defined knowledge",
+    )
+    brief_path.write_text(changed, encoding="utf-8")
+    manifest_path = source / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["extraction_brief"]["bytes"] = len(changed.encode("utf-8"))
+    manifest["extraction_brief"]["sha256"] = hashlib.sha256(
+        changed.encode("utf-8")
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="checkpoint does not match"):
+        run_course_document(
+            source,
+            output,
+            FakeCourseGraph(),
+            options=options,
+            input_format="document-package",
+        )
+
+
 def test_course_pipeline_combines_nodes_and_local_edges_in_one_model_call(tmp_path):
     source = _write_package(tmp_path / "course.hepkg")
     output = tmp_path / "output"
@@ -383,6 +470,69 @@ def test_transient_timeout_retries_same_chunk_without_splitting(tmp_path):
 
     assert graph.calls == 1
     assert not checkpoint.chunk_dir("chunk-1-a").joinpath("nodes.json").exists()
+
+
+def test_truncated_node_output_splits_chunk_and_continues(tmp_path):
+    class TruncatingGraph:
+        def __init__(self):
+            self.calls = 0
+
+        def extract_nodes(self, context):
+            self.calls += 1
+            if "First paragraph" in context and "Second paragraph" in context:
+                raise OutputTruncatedError("finish_reason=length")
+            name = "First" if "First paragraph" in context else "Second"
+            return [
+                CourseNode(
+                    name=name,
+                    level="point",
+                    summary=f"{name} definition",
+                    evidence=f"{name} evidence",
+                )
+            ]
+
+        def extract_edges(self, _context, _nodes):
+            return []
+
+        def graph_schema(self, *, nodes, edges):
+            return SimpleNamespace(nodes=nodes, edges=edges)
+
+    graph = TruncatingGraph()
+    outline = DocumentOutline(
+        document_name="Course",
+        nodes=[
+            OutlineNode(id="root", title="Course", level=0),
+            OutlineNode(
+                id="section", title="Section", level=1, parent_id="root", order=1
+            ),
+        ],
+    )
+    chunk = DocumentChunk(
+        id="chunk-1",
+        index=0,
+        outline_id="section",
+        top_level_id="section",
+        outline_path=["Section"],
+        text="First paragraph.\n\nSecond paragraph.",
+        token_count=8,
+    )
+    checkpoint = RunCheckpoint(
+        tmp_path / "output",
+        source_fingerprint="source",
+        config={"test": True},
+    )
+
+    result = _extract_chunk(
+        graph,
+        outline,
+        chunk,
+        [],
+        checkpoint,
+        PipelineOptions(retry_attempts=1, heartbeat_interval=1),
+    )
+
+    assert graph.calls == 3
+    assert {node["name"] for node in result["nodes"]} == {"First", "Second"}
 
 
 def test_quality_coverage_treats_grouping_outline_as_covered_by_descendant():

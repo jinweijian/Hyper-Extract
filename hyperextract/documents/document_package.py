@@ -11,6 +11,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from hyperextract.briefs import ExtractionBrief, load_extraction_brief
+
 from .models import DocumentOutline, OutlineNode, SourceBlock, SourceReference
 
 
@@ -39,6 +41,12 @@ class PackageDocument(_ContractModel):
 class PackageProducer(_ContractModel):
     name: str
     version: str
+
+
+class PackageArtifact(_ContractModel):
+    path: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    bytes: int = Field(ge=0, le=256 * 1024)
 
 
 ContentKind = Literal[
@@ -72,12 +80,21 @@ class PackageContent(_ContractModel):
 
 class PackageManifest(_ContractModel):
     schema_name: Literal["HyperExtractDocumentPackage"]
-    schema_version: Literal["1.0"]
+    schema_version: Literal["1.0", "1.1"]
     document: PackageDocument
     producer: PackageProducer
     outline_path: str
     provenance_path: str
+    extraction_brief: PackageArtifact | None = None
     contents: list[PackageContent]
+
+    @model_validator(mode="after")
+    def require_extraction_brief_for_v1_1(self) -> "PackageManifest":
+        if self.schema_version == "1.1" and self.extraction_brief is None:
+            raise ValueError(
+                "Document Package v1.1 requires extraction_brief inside the package"
+            )
+        return self
 
 
 class PackageOutlineNode(_ContractModel):
@@ -107,14 +124,30 @@ class ValidatedDocumentPackage:
     outline: PackageOutline
     provenance: dict[str, PackageProvenance]
     content_bytes: dict[str, bytes]
+    extraction_brief: ExtractionBrief | None
+    extraction_brief_bytes: bytes | None
 
 
 def document_package_schemas() -> dict[str, dict]:
     """Expose the public v1 contract without leaking private implementation types."""
+    manifest_schema = PackageManifest.model_json_schema()
+    manifest_schema.setdefault("allOf", []).append(
+        {
+            "if": {
+                "properties": {"schema_version": {"const": "1.1"}},
+                "required": ["schema_version"],
+            },
+            "then": {
+                "required": ["extraction_brief"],
+                "properties": {"extraction_brief": {"not": {"type": "null"}}},
+            },
+        }
+    )
     return {
-        "manifest": PackageManifest.model_json_schema(),
+        "manifest": manifest_schema,
         "outline": PackageOutline.model_json_schema(),
         "provenance": PackageProvenance.model_json_schema(),
+        "extraction_brief": ExtractionBrief.model_json_schema(),
     }
 
 
@@ -266,6 +299,20 @@ def validate_document_package(
 
     content_bytes: dict[str, bytes] = {}
     total_bytes = outline_path.stat().st_size + provenance_path.stat().st_size
+    extraction_brief: ExtractionBrief | None = None
+    extraction_brief_bytes: bytes | None = None
+    if manifest.extraction_brief is not None:
+        declaration = manifest.extraction_brief
+        brief_path = _safe_file(root, declaration.path)
+        if brief_path.suffix.lower() not in {".yaml", ".yml"}:
+            raise ValueError("Document Package ExtractionBrief must be YAML")
+        extraction_brief_bytes = brief_path.read_bytes()
+        if len(extraction_brief_bytes) != declaration.bytes:
+            raise ValueError("Document Package ExtractionBrief byte size mismatch")
+        if hashlib.sha256(extraction_brief_bytes).hexdigest() != declaration.sha256:
+            raise ValueError("Document Package ExtractionBrief hash mismatch")
+        extraction_brief = load_extraction_brief(brief_path)
+        total_bytes += len(extraction_brief_bytes)
     for item in manifest.contents:
         if item.outline_id is not None and item.outline_id not in outline_nodes:
             raise ValueError(
@@ -290,6 +337,8 @@ def validate_document_package(
         outline=outline,
         provenance=provenance,
         content_bytes=content_bytes,
+        extraction_brief=extraction_brief,
+        extraction_brief_bytes=extraction_brief_bytes,
     )
 
 
@@ -353,17 +402,27 @@ def load_document_package(
     return outline, blocks
 
 
+def load_package_extraction_brief(path: str | Path) -> ExtractionBrief | None:
+    """Return the validated package-owned ExtractionBrief, when declared."""
+    return validate_document_package(path).extraction_brief
+
+
 def document_package_fingerprint(path: str | Path) -> str:
     """Return a stable content fingerprint after strict package validation."""
     package = validate_document_package(path)
+    manifest_payload = package.manifest.model_dump(mode="json")
+    if package.manifest.extraction_brief is None:
+        manifest_payload.pop("extraction_brief", None)
     payload = {
-        "manifest": package.manifest.model_dump(mode="json"),
+        "manifest": manifest_payload,
         "outline": package.outline.model_dump(mode="json"),
         "provenance": [
             package.provenance[item.id].model_dump(mode="json")
             for item in sorted(package.manifest.contents, key=lambda entry: entry.order)
         ],
     }
+    if package.extraction_brief is not None:
+        payload["extraction_brief"] = package.extraction_brief.model_dump(mode="json")
     canonical = json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )

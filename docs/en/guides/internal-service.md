@@ -1,10 +1,16 @@
 # Internal Course Graph Service
 
 The internal service separates the data plane from the control plane. A parser
-publishes a Document Package v1 directory to a shared `/exchange` volume. A
+publishes a Document Package v1.1 directory to a shared `/exchange` volume. A
 caller submits only its `file://` URI, canonical package fingerprint, and
 server-side profile names. Hyper-Extract never starts Docling and API keys are
 never accepted in task requests.
+
+The caller-owned [ExtractionBrief](extraction-brief.md) YAML must live inside
+the package and be declared by `manifest.extraction_brief`. The API does not
+accept request-level system prompt text or an external brief path. HE validates
+the brief bytes and includes the normalized intent in package, prompt, and
+checkpoint fingerprints.
 
 ## Publish input
 

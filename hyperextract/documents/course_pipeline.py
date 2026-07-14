@@ -15,6 +15,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+import yaml
+
 from hyperextract.methods.rag.course_knowledge_graph import (
     COURSE_PROFILE_VERSION,
     CommunityReport,
@@ -29,7 +31,7 @@ from hyperextract.methods.rag.course_knowledge_graph import (
 )
 from hyperextract.profiles.course import CourseExtractionProfile, load_course_profile
 
-from .checkpoint import RunCheckpoint, atomic_write_json, fingerprint
+from .checkpoint import RunCheckpoint, atomic_write_json, atomic_write_text, fingerprint
 from .context_planner import ContextBudget, ContextBudgetError
 from .course_graph import (
     CourseKnowledgeNodeV1,
@@ -42,7 +44,11 @@ from .docling import (
     plan_document_chunks,
     render_chunk_context,
 )
-from .document_package import document_package_fingerprint, load_document_package
+from .document_package import (
+    document_package_fingerprint,
+    load_document_package,
+    load_package_extraction_brief,
+)
 from .model_errors import (
     ContextWindowExceededError,
     OutputTruncatedError,
@@ -162,7 +168,10 @@ def _is_retryable(error: Exception) -> bool:
 
 
 def _is_size_error(error: Exception) -> bool:
-    return isinstance(error, (ContextWindowExceededError, ContextBudgetError))
+    return isinstance(
+        error,
+        (ContextWindowExceededError, ContextBudgetError, OutputTruncatedError),
+    )
 
 
 def _retry(
@@ -1249,8 +1258,17 @@ def run_course_document(
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
     resolved_input_format = _resolve_input_format(source, input_format)
+    extraction_brief = None
     if resolved_input_format == "document-package":
         source_hash = document_package_fingerprint(source)
+        extraction_brief = load_package_extraction_brief(source)
+        if extraction_brief is not None:
+            apply_brief = getattr(ka, "apply_extraction_brief", None)
+            if not callable(apply_brief):
+                raise ValueError(
+                    "The selected extraction method does not support ExtractionBrief"
+                )
+            apply_brief(extraction_brief)
     else:
         source_hash = _file_sha256(source)
     llm_client = getattr(ka, "llm_client", None)
@@ -1285,6 +1303,14 @@ def run_course_document(
         ),
         "embedder_model": str(embed_model or "unknown"),
     }
+    if extraction_brief is not None:
+        config.update(
+            {
+                "extraction_brief_id": extraction_brief.metadata.id,
+                "extraction_brief_version": extraction_brief.metadata.version,
+                "extraction_brief_hash": extraction_brief.content_hash,
+            }
+        )
     if resume and not force:
         _migrate_compatible_profile_checkpoint(
             output,
@@ -1300,6 +1326,28 @@ def run_course_document(
         run_id=control.run_id if control else None,
         event_sink=control.event_sink if control else None,
     )
+    if extraction_brief is not None:
+        normalized_brief = extraction_brief.model_dump(mode="json")
+        atomic_write_json(
+            checkpoint.root / "extraction-brief.normalized.json", normalized_brief
+        )
+        atomic_write_text(
+            checkpoint.root / "extraction-brief.snapshot.yaml",
+            yaml.safe_dump(
+                normalized_brief,
+                allow_unicode=True,
+                sort_keys=False,
+                default_flow_style=False,
+            ),
+        )
+        for stage, messages in getattr(ka, "prompt_snapshots", {}).items():
+            atomic_write_text(
+                checkpoint.root / "prompts" / f"{stage}.txt",
+                "### SYSTEM\n"
+                + messages.get("system", "")
+                + "\n\n### USER TEMPLATE\n"
+                + messages.get("user", ""),
+            )
     usage_tracker = getattr(ka, "usage_tracker", None)
     if usage_tracker is not None:
         usage_tracker.attach(output / "model-usage.json", resume=resume, force=force)
@@ -1323,6 +1371,14 @@ def run_course_document(
             "started",
             f"读取结构化文档（{resolved_input_format}）：{source.name}",
         )
+        if extraction_brief is not None:
+            checkpoint.emit(
+                "ingest",
+                "progress",
+                "加载 ExtractionBrief "
+                f"{extraction_brief.metadata.id} v{extraction_brief.metadata.version} "
+                f"({extraction_brief.content_hash[:12]})",
+            )
         if resolved_input_format == "document-package":
             outline, blocks = load_document_package(source)
         else:
@@ -1543,6 +1599,15 @@ def run_course_document(
                 "source": str(source),
                 "source_sha256": source_hash,
                 "run_id": checkpoint.run_id,
+                **(
+                    {
+                        "extraction_brief_id": extraction_brief.metadata.id,
+                        "extraction_brief_version": extraction_brief.metadata.version,
+                        "extraction_brief_hash": extraction_brief.content_hash,
+                    }
+                    if extraction_brief is not None
+                    else {}
+                ),
             }
         )
 
@@ -1681,6 +1746,15 @@ def run_course_document(
                 "content_hash": profile_hash,
                 "prompt_hash": prompt_hash,
             },
+            "extraction_brief": (
+                {
+                    "id": extraction_brief.metadata.id,
+                    "version": extraction_brief.metadata.version,
+                    "content_hash": extraction_brief.content_hash,
+                }
+                if extraction_brief is not None
+                else None
+            ),
             "quality": quality,
             "model_usage": model_usage,
             "global_edge_candidates": global_edge_candidates,

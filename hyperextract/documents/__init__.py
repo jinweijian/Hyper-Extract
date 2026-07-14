@@ -9,6 +9,7 @@ from .document_package import (
     document_package_fingerprint,
     document_package_schemas,
     load_document_package,
+    load_package_extraction_brief,
     validate_document_package,
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     "document_package_fingerprint",
     "document_package_schemas",
     "load_document_package",
+    "load_package_extraction_brief",
     "validate_document_package",
 ]

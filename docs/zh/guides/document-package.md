@@ -7,6 +7,7 @@ Document Package 是解析器与 Hyper-Extract 之间的稳定协议。解析器
 ```text
 book.hepkg/
   manifest.json
+  extraction-brief.yaml  # schema 1.1 必需
   outline.json
   provenance.jsonl
   content/*.md
@@ -17,11 +18,12 @@ book.hepkg/
 | 字段 | 说明 |
 |---|---|
 | `schema_name` | 固定为 `HyperExtractDocumentPackage` |
-| `schema_version` | 当前为 `1.0` |
+| `schema_version` | `1.0` 兼容旧包；新接入使用 `1.1` |
 | `document` | `id`、`title`、`language` 和可选源文件信息 |
 | `producer` | 适配器名称和版本 |
 | `outline_path` | 目录 JSON 的包内相对路径 |
 | `provenance_path` | JSONL 来源映射的包内相对路径 |
+| `extraction_brief` | v1.1 必填；包内 YAML 的路径、SHA-256 和字节数 |
 | `contents` | 内容 ID、路径、顺序、类型、目录 ID、SHA-256、字节数和抽取策略 |
 
 内容类型支持 `body`、`table_of_contents`、`appendix`、`references`、`index`、`front_matter`、`back_matter` 和 `other`。只有 `extract=true` 的内容进入切块与模型抽取，但所有声明文件都会先校验。
@@ -47,6 +49,8 @@ book.hepkg/
 
 未在 manifest 声明的文件默认忽略。
 
+Document Package v1.1 中的 [ExtractionBrief](extraction-brief.md) 是调用方提供 system instruction 的唯一正式通道。HE 不接受 API 请求内的临时 Prompt 字符串，也不读取 Package 外部 Brief 路径。Brief 会与正文、目录和来源映射一起进入包指纹。
+
 ## 运行
 
 ```bash
@@ -58,4 +62,4 @@ he parse ./book.hepkg \
   --no-index
 ```
 
-包的规范化内容指纹进入断点配置。内容、目录或来源发生变化后，旧现场不会被错误复用。`docling-json` 仍可用于迁移，但新的生产接入应由调用方生成 Document Package。
+包的规范化内容指纹进入断点配置。内容、目录、来源或 Brief 发生变化后，旧现场不会被错误复用。`docling-json` 仍可用于迁移，但新的生产接入应由调用方生成 Document Package v1.1。

@@ -5,6 +5,7 @@ from hyperextract.methods.rag.course_knowledge_graph import (
     stable_node_id,
 )
 from hyperextract.profiles.course import load_course_profile
+from hyperextract.briefs import ExtractionBrief
 from tests.mocks import MockChatModel, MockEmbeddings
 
 
@@ -37,3 +38,30 @@ def test_course_method_uses_compiled_profile_for_every_prompt_stage():
     assert "仅主题相近" in graph.compiled_profile.local_edges
     assert "仅主题相近" in graph.compiled_profile.global_edges
     assert "完全相同" in graph.compiled_profile.dedup
+
+
+def test_course_method_compiles_brief_into_stage_system_messages():
+    brief = ExtractionBrief.model_validate(
+        {
+            "schema_name": "HyperExtractExtractionBrief",
+            "schema_version": "1.0",
+            "metadata": {"id": "pmbok", "version": "1"},
+            "task": {"objective": "Build a navigable knowledge graph"},
+            "stage_instructions": {
+                "node_extraction": ["Keep section hierarchy"],
+                "global_relation_extraction": ["Prefer explicit dependencies"],
+            },
+        }
+    )
+    graph = CourseKnowledgeGraph(
+        llm_client=MockChatModel(),
+        embedder=MockEmbeddings(dim=8),
+        extraction_brief=brief,
+    )
+
+    assert "Keep section hierarchy" in graph.prompt_snapshots["nodes"]["system"]
+    assert "Prefer explicit dependencies" not in graph.prompt_snapshots["nodes"]["system"]
+    assert "Prefer explicit dependencies" in graph.prompt_snapshots["global_edges"]["system"]
+    assert "{source_text}" in graph.prompt_snapshots["nodes"]["user"]
+    assert "{source_text}" not in graph.prompt_snapshots["nodes"]["system"]
+    assert graph.brief_hash == brief.content_hash

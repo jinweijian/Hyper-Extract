@@ -7,12 +7,15 @@ Document Package is the stable boundary between a document parser and Hyper-Extr
 ```text
 book.hepkg/
   manifest.json
+  extraction-brief.yaml  # required by schema 1.1
   outline.json
   provenance.jsonl
   content/*.md
 ```
 
-`manifest.json` uses `schema_name: HyperExtractDocumentPackage` and `schema_version: 1.0`. It declares document and producer metadata plus the paths of the outline and provenance files. Every content entry declares its ID, relative path, order, content kind, outline ID, SHA-256, byte count, and extraction policy.
+`manifest.json` uses `schema_name: HyperExtractDocumentPackage`. Version `1.0` remains readable for compatibility. Version `1.1` additionally requires an `extraction_brief` artifact with a package-relative YAML path, SHA-256, and byte count. Every content entry declares its ID, relative path, order, content kind, outline ID, SHA-256, byte count, and extraction policy.
+
+The package-owned [ExtractionBrief](extraction-brief.md) is the only supported caller system-instruction channel. It is validated and fingerprinted with the document; request-level prompt strings and external brief paths are not accepted.
 
 Supported content kinds are `body`, `table_of_contents`, `appendix`, `references`, `index`, `front_matter`, `back_matter`, and `other`. Only entries with `extract=true` reach chunk planning and model extraction, while every declared file is validated.
 
@@ -39,4 +42,4 @@ he parse ./book.hepkg \
   --no-index
 ```
 
-The normalized package fingerprint is part of checkpoint identity. `docling-json` remains available for migration, but new production integrations should produce a Document Package.
+The normalized package fingerprint, including the v1.1 brief, is part of checkpoint identity. `docling-json` remains available for migration, but new production integrations should produce a Document Package v1.1.

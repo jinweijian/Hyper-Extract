@@ -160,7 +160,7 @@ def create_app(
     def capabilities() -> dict:
         return {
             "pipelines": ["course_graph"],
-            "document_package_versions": ["1.0"],
+            "document_package_versions": ["1.0", "1.1"],
             "package_schemes": ["file"],
             "lifecycle": ["create", "status", "cancel", "resume", "artifacts"],
         }
@@ -189,8 +189,18 @@ def create_app(
         return {
             "valid": True,
             "sha256": actual,
+            "schema_version": validated.manifest.schema_version,
             "document_id": validated.manifest.document.id,
             "content_count": len(validated.manifest.contents),
+            "extraction_brief": (
+                {
+                    "id": validated.extraction_brief.metadata.id,
+                    "version": validated.extraction_brief.metadata.version,
+                    "content_hash": validated.extraction_brief.content_hash,
+                }
+                if validated.extraction_brief is not None
+                else None
+            ),
         }
 
     @app.post("/v1/runs", status_code=202)

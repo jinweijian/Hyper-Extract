@@ -39,6 +39,17 @@ def atomic_write_json(path: str | Path, value: Any) -> None:
     os.replace(temporary, target)
 
 
+def atomic_write_text(path: str | Path, value: str) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(f"{target.suffix}.{uuid.uuid4().hex}.tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        handle.write(value)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, target)
+
+
 class RunCheckpoint:
     def __init__(
         self,

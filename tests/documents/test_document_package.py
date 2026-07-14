@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hyperextract.documents.document_package import (
     document_package_fingerprint,
@@ -94,6 +95,31 @@ def _replace_manifest(root: Path, manifest: dict) -> None:
     (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
 
+def _add_extraction_brief(root: Path) -> Path:
+    brief = {
+        "schema_name": "HyperExtractExtractionBrief",
+        "schema_version": "1.0",
+        "metadata": {"id": "test-brief", "version": "1.0"},
+        "task": {"objective": "Extract independently useful knowledge"},
+        "extraction_policy": {"focus": ["defined concepts"]},
+        "stage_instructions": {
+            "node_extraction": ["Prefer definitions over mentions"]
+        },
+    }
+    brief_text = yaml.safe_dump(brief, allow_unicode=True, sort_keys=False)
+    brief_path = root / "extraction-brief.yaml"
+    brief_path.write_text(brief_text, encoding="utf-8")
+    manifest = _manifest(root)
+    manifest["schema_version"] = "1.1"
+    manifest["extraction_brief"] = {
+        "path": "extraction-brief.yaml",
+        "sha256": _sha256(brief_text),
+        "bytes": len(brief_text.encode("utf-8")),
+    }
+    _replace_manifest(root, manifest)
+    return root
+
+
 def test_load_document_package_uses_outline_and_only_extractable_content(tmp_path):
     root = _write_package(tmp_path / "course.hepkg")
 
@@ -106,6 +132,29 @@ def test_load_document_package_uses_outline_and_only_extractable_content(tmp_pat
     assert blocks[0].top_level_id == "section-2-1"
     assert blocks[0].source_refs[0].source_path == "source.md"
     assert blocks[0].source_refs[0].start_line == 10
+
+
+def test_document_package_v1_1_requires_and_loads_package_brief(tmp_path):
+    root = _write_package(tmp_path / "course.hepkg")
+    manifest = _manifest(root)
+    manifest["schema_version"] = "1.1"
+    _replace_manifest(root, manifest)
+    with pytest.raises(ValueError, match="requires extraction_brief"):
+        validate_document_package(root)
+
+    root = _add_extraction_brief(root)
+    package = validate_document_package(root)
+
+    assert package.extraction_brief is not None
+    assert package.extraction_brief.metadata.id == "test-brief"
+
+
+def test_document_package_rejects_tampered_extraction_brief(tmp_path):
+    root = _add_extraction_brief(_write_package(tmp_path / "course.hepkg"))
+    (root / "extraction-brief.yaml").write_text("tampered: true\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="byte size|hash mismatch"):
+        validate_document_package(root)
 
 
 @pytest.mark.parametrize("path", ["../outside.md", "/tmp/outside.md"])

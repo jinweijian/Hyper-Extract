@@ -15,6 +15,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from ontomem.merger import MergeStrategy
 from pydantic import BaseModel, Field, field_validator
 
+from hyperextract.briefs import ExtractionBrief, render_extraction_brief
 from hyperextract.types import AutoGraph
 from hyperextract.documents.structured_output import StructuredOutputInvoker
 from hyperextract.documents.model_usage import ModelUsageTracker
@@ -123,6 +124,23 @@ GLOBAL_EDGE_PROMPT = _DEFAULT_COMPILED_PROFILE.global_edges
 DEDUP_PROMPT = _DEFAULT_COMPILED_PROFILE.dedup
 COMMUNITY_PROMPT = _DEFAULT_COMPILED_PROFILE.community
 
+_STAGE_MARKERS = {
+    "nodes": "### 文档上下文",
+    "chunk": "### 文档上下文",
+    "local_edges": "### 给定知识点",
+    "global_edges": "### 候选知识点对",
+    "dedup": "A: {left}",
+    "community": "知识点：",
+}
+_BRIEF_STAGES = {
+    "nodes": "node_extraction",
+    "chunk": "combined_local_extraction",
+    "local_edges": "local_relation_extraction",
+    "global_edges": "global_relation_extraction",
+    "dedup": "deduplication",
+    "community": "community",
+}
+
 
 def normalize_name(value: str) -> str:
     return re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", value.lower())
@@ -146,12 +164,15 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
         profile: CourseExtractionProfile | None = None,
         structured_output_mode: str | None = None,
         output_repair_attempts: int | None = None,
+        extraction_brief: ExtractionBrief | None = None,
     ) -> None:
         self.profile = profile or _DEFAULT_PROFILE
+        self.extraction_brief = extraction_brief
         self.compiled_profile = compile_course_profile(self.profile)
         self.profile_name = self.profile.name
         self.profile_version = self.profile.version
         self.profile_hash = self.profile.content_hash
+        self.brief_hash = extraction_brief.content_hash if extraction_brief else ""
         self.prompt_hash = self.compiled_profile.prompt_hash
         self.usage_tracker = ModelUsageTracker()
         self.structured_output_mode = structured_output_mode
@@ -195,8 +216,18 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
             if self.output_repair_attempts is not None
             else int(os.environ.get("HYPER_EXTRACT_OUTPUT_REPAIR_ATTEMPTS", "1"))
         )
+        prompts = self._compile_prompt_messages()
+        self.prompt_snapshots = prompts
+        self.prompt_hash = hashlib.sha256(
+            json.dumps(
+                prompts,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         self.node_extractor = (
-            ChatPromptTemplate.from_template(self.compiled_profile.nodes)
+            self._chat_prompt(prompts["nodes"])
             | StructuredOutputInvoker(
                 self.llm_client,
                 self.node_list_schema,
@@ -207,7 +238,7 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
             ).as_runnable()
         )
         self.chunk_extractor = (
-            ChatPromptTemplate.from_template(self.compiled_profile.chunk)
+            self._chat_prompt(prompts["chunk"])
             | StructuredOutputInvoker(
                 self.llm_client,
                 CourseChunkResult,
@@ -218,7 +249,7 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
             ).as_runnable()
         )
         self.edge_extractor = (
-            ChatPromptTemplate.from_template(self.compiled_profile.local_edges)
+            self._chat_prompt(prompts["local_edges"])
             | StructuredOutputInvoker(
                 self.llm_client,
                 self.edge_list_schema,
@@ -229,7 +260,7 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
             ).as_runnable()
         )
         self.global_edge_extractor = (
-            ChatPromptTemplate.from_template(self.compiled_profile.global_edges)
+            self._chat_prompt(prompts["global_edges"])
             | StructuredOutputInvoker(
                 self.llm_client,
                 CourseEdgeList,
@@ -240,7 +271,7 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
             ).as_runnable()
         )
         self.dedup_extractor = (
-            ChatPromptTemplate.from_template(self.compiled_profile.dedup)
+            self._chat_prompt(prompts["dedup"])
             | StructuredOutputInvoker(
                 self.llm_client,
                 DedupDecision,
@@ -251,7 +282,7 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
             ).as_runnable()
         )
         self.community_extractor = (
-            ChatPromptTemplate.from_template(self.compiled_profile.community)
+            self._chat_prompt(prompts["community"])
             | StructuredOutputInvoker(
                 self.llm_client,
                 CommunityReport,
@@ -262,6 +293,45 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
             ).as_runnable()
         )
 
+    def _compile_prompt_messages(self) -> dict[str, dict[str, str]]:
+        prompts = {
+            "nodes": self.compiled_profile.nodes,
+            "chunk": self.compiled_profile.chunk,
+            "local_edges": self.compiled_profile.local_edges,
+            "global_edges": self.compiled_profile.global_edges,
+            "dedup": self.compiled_profile.dedup,
+            "community": self.compiled_profile.community,
+        }
+        if self.extraction_brief is None:
+            return {
+                name: {"system": "", "user": prompt} for name, prompt in prompts.items()
+            }
+        compiled: dict[str, dict[str, str]] = {}
+        for name, prompt in prompts.items():
+            marker = _STAGE_MARKERS[name]
+            if marker not in prompt:
+                raise ValueError(f"Course profile prompt is missing marker: {marker}")
+            profile_instructions, user = prompt.split(marker, maxsplit=1)
+            user = f"{marker}{user}"
+            compiled[name] = {
+                "system": render_extraction_brief(
+                    self.extraction_brief,
+                    _BRIEF_STAGES[name],
+                    profile_instructions=profile_instructions,
+                ),
+                "user": user,
+            }
+        return compiled
+
+    @staticmethod
+    def _chat_prompt(messages: dict[str, str]) -> ChatPromptTemplate:
+        if not messages["system"]:
+            return ChatPromptTemplate.from_template(messages["user"])
+        system = messages["system"].replace("{", "{{").replace("}", "}}")
+        return ChatPromptTemplate.from_messages(
+            [("system", system), ("human", messages["user"])]
+        )
+
     def apply_profile(self, profile: CourseExtractionProfile) -> None:
         """Replace all course-stage prompts with one validated profile."""
         self.profile = profile
@@ -269,7 +339,12 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
         self.profile_name = profile.name
         self.profile_version = profile.version
         self.profile_hash = profile.content_hash
-        self.prompt_hash = self.compiled_profile.prompt_hash
+        self._configure_profile_extractors()
+
+    def apply_extraction_brief(self, brief: ExtractionBrief | None) -> None:
+        """Compile a package-owned run brief into every model stage."""
+        self.extraction_brief = brief
+        self.brief_hash = brief.content_hash if brief else ""
         self._configure_profile_extractors()
 
     def _create_empty_instance(self) -> "CourseKnowledgeGraph":
@@ -283,6 +358,7 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
             profile=self.profile,
             structured_output_mode=self.structured_output_mode,
             output_repair_attempts=self.output_repair_attempts,
+            extraction_brief=self.extraction_brief,
         )
 
     def extract_nodes(self, source_text: str) -> list[CourseNode]:
