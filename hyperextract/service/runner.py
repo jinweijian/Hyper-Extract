@@ -33,7 +33,7 @@ class CourseRunExecutor:
     def execute(self, record) -> dict[str, object]:
         request = record.request_json
         execution = request.get("execution") or {}
-        profile = self.registry.get(
+        profile = self.registry.resolve_runtime(
             str(execution.get("model_profile", "minimax-course-default"))
         )
         llm_kwargs = {"timeout": profile.request_timeout, "max_retries": 0}
