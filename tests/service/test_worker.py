@@ -231,3 +231,177 @@ def test_worker_heartbeats_during_idle(repository, settings):
         row = session.get(WorkerHeartbeatEntity, "worker-idle")
         assert row is not None
         assert row.last_seen_at is not None
+
+
+# ---------------------------------------------------------------------------
+# Task 6: Reconcile published artifacts after crashes
+# ---------------------------------------------------------------------------
+
+
+def test_worker_reconciles_success_marker_without_rerunning_model(
+    repository, settings
+):
+    """If artifacts are already published (crash after publish but before
+    PostgreSQL ``complete``), the worker must complete the run in PostgreSQL
+    WITHOUT rerunning the model pipeline."""
+
+    from unittest.mock import MagicMock
+
+    run_id = "run_reconcile_marker"
+    command = _make_command(
+        run_id, (settings.run_root / run_id).as_uri() + "/"
+    )
+    repository.create_or_get(command, "reconcile-marker-key")
+    # Simulate a previous worker that published artifacts but crashed
+    # before calling repository.complete().
+    work = settings.run_root / run_id / "work"
+    work.mkdir(parents=True)
+    write_graph(work, run_id)
+    publisher = ArtifactPublisher(settings.run_root)
+    publisher.publish(repository.get(run_id), {"status": "completed"})
+
+    executor = MagicMock()
+    worker = ServiceWorker(
+        repository,
+        executor,
+        publisher,
+        settings,
+        worker_id="worker-reconcile",
+    )
+    worker.run_once()
+
+    assert repository.get(run_id).status == "completed"
+    executor.execute.assert_not_called()
+
+
+def test_worker_fails_run_when_publication_is_partial(repository, settings):
+    """A partial publication (marker without manifest, or vice versa) must
+    fail the run with ARTIFACT_STATE_INCONSISTENT and never be overwritten."""
+
+    run_id = "run_partial_publication"
+    command = _make_command(
+        run_id, (settings.run_root / run_id).as_uri() + "/"
+    )
+    repository.create_or_get(command, "partial-publication-key")
+    # Create a partial publication (marker only)
+    artifacts = settings.run_root / run_id / "artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "_SUCCESS").write_text("{}", encoding="utf-8")
+
+    from unittest.mock import MagicMock
+
+    executor = MagicMock()
+    worker = ServiceWorker(
+        repository,
+        executor,
+        ArtifactPublisher(settings.run_root),
+        settings,
+        worker_id="worker-partial",
+    )
+    worker.run_once()
+
+    record = repository.get(run_id)
+    assert record.status == "failed"
+    assert record.error_summary["code"] == "ARTIFACT_STATE_INCONSISTENT"
+    # The executor must NOT have been called — partial publication is fatal.
+    executor.execute.assert_not_called()
+    # The partial state must not be overwritten.
+    assert (artifacts / "_SUCCESS").exists()
+
+
+def test_provider_secret_is_not_saved_in_failure(repository, settings):
+    """Provider secrets (Bearer tokens, API keys) must not appear in the
+    persisted failure message visible to API callers."""
+
+    from unittest.mock import MagicMock
+
+    run_id = "run_secret_redact"
+    command = _make_command(
+        run_id, (settings.run_root / run_id).as_uri() + "/"
+    )
+    repository.create_or_get(command, "secret-redact-key")
+    (settings.run_root / run_id / "work").mkdir(parents=True)
+
+    executor = MagicMock()
+    executor.execute.side_effect = RuntimeError("Bearer sk-secret-value")
+    worker = ServiceWorker(
+        repository,
+        executor,
+        ArtifactPublisher(settings.run_root),
+        settings,
+        worker_id="worker-secret",
+    )
+    worker.run_once()
+
+    errors = repository.list_errors(run_id)
+    assert len(errors) == 1
+    assert "sk-secret-value" not in errors[0].message
+    # Public message is capped at 500 characters.
+    assert len(errors[0].message) <= 500
+
+
+def test_provider_api_key_pattern_is_redacted_in_failure(repository, settings):
+    """The ``sk-`` API-key prefix pattern must be redacted from the
+    persisted failure message."""
+
+    from unittest.mock import MagicMock
+
+    run_id = "run_api_key_redact"
+    command = _make_command(
+        run_id, (settings.run_root / run_id).as_uri() + "/"
+    )
+    repository.create_or_get(command, "api-key-redact-key")
+    (settings.run_root / run_id / "work").mkdir(parents=True)
+
+    executor = MagicMock()
+    executor.execute.side_effect = RuntimeError(
+        "Request failed with key=sk-AbcDef1234567890GhiJkl"
+    )
+    worker = ServiceWorker(
+        repository,
+        executor,
+        ArtifactPublisher(settings.run_root),
+        settings,
+        worker_id="worker-api-key",
+    )
+    worker.run_once()
+
+    error = repository.list_errors(run_id)[0]
+    assert "sk-AbcDef1234567890GhiJkl" not in error.message
+
+
+def test_worker_saves_attempt_diagnostics_under_diagnostics_dir(
+    repository, settings
+):
+    """Detailed non-secret diagnostics must be saved under
+    ``diagnostics/attempts/`` (NOT in the API response)."""
+
+    from unittest.mock import MagicMock
+
+    run_id = "run_diagnostics"
+    command = _make_command(
+        run_id, (settings.run_root / run_id).as_uri() + "/"
+    )
+    repository.create_or_get(command, "diagnostics-key")
+    (settings.run_root / run_id / "work").mkdir(parents=True)
+
+    executor = MagicMock()
+    executor.execute.side_effect = RuntimeError("Bearer sk-secret-value")
+    worker = ServiceWorker(
+        repository,
+        executor,
+        ArtifactPublisher(settings.run_root),
+        settings,
+        worker_id="worker-diag",
+    )
+    worker.run_once()
+
+    attempt_file = (
+        settings.run_root / run_id / "diagnostics" / "attempts" / "attempt-1.json"
+    )
+    assert attempt_file.is_file()
+    payload = json.loads(attempt_file.read_text())
+    assert payload["error_type"] == "RuntimeError"
+    # The diagnostics file is allowed to contain redacted secrets, but never
+    # the raw secret value.
+    assert "sk-secret-value" not in payload["error_message"]

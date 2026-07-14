@@ -9,6 +9,7 @@ import uuid
 from hyperextract.documents.course_pipeline import RunCancelled
 
 from .artifacts import ArtifactPublisher
+from .errors import normalize_failure
 from .settings import ServiceSettings
 
 _WORKER_VERSION = "1.0.0"
@@ -59,6 +60,32 @@ class ServiceWorker:
             record.run_id, lease_lost
         )
         try:
+            # Before model execution, reconcile any previously published
+            # artifacts. A worker may have crashed *after* publishing but
+            # before ``repository.complete`` ran — in that case we complete
+            # the PostgreSQL row without rerunning the model. A partial or
+            # invalid publication is fatal (ARTIFACT_STATE_INCONSISTENT)
+            # and is NEVER overwritten.
+            try:
+                published_manifest = self.publisher.inspect_published(
+                    record.run_id
+                )
+            except ValueError as error:
+                self._handle_failure(record.run_id, error, lease_lost)
+                return True
+
+            if published_manifest is not None:
+                if lease_lost.is_set():
+                    return True
+                self.repository.complete(
+                    record.run_id,
+                    {
+                        "status": "completed",
+                        "reconciled_from_published_artifacts": True,
+                    },
+                )
+                return True
+
             summary = self._execute(record, lease_lost)
         except RunCancelled:
             # If the lease was lost, another worker or requeue_expired_leases
@@ -67,13 +94,7 @@ class ServiceWorker:
                 self.repository.mark_cancelled(record.run_id, self.worker_id)
             return True
         except Exception as error:
-            if not lease_lost.is_set():
-                self.repository.fail(
-                    record.run_id,
-                    code="RUN_EXECUTION_FAILED",
-                    message=f"{type(error).__name__}: {error}",
-                    resumable=True,
-                )
+            self._handle_failure(record.run_id, error, lease_lost)
             return True
         else:
             # Only publish and complete if the lease is still ours.
@@ -86,6 +107,42 @@ class ServiceWorker:
             lease_lost.set()  # signal the heartbeat thread to stop
             if heartbeat_thread is not None:
                 heartbeat_thread.join(timeout=5)
+
+    def _handle_failure(
+        self, run_id: str, error: BaseException, lease_lost: threading.Event
+    ) -> None:
+        """Normalize the failure, persist it, and save detailed diagnostics.
+
+        ``details_json`` (stored in ``he_run_errors``) is intentionally
+        dropped from the public API by :meth:`RunRepository.list_errors` —
+        only the redacted ``message`` is exposed to callers. The detailed
+        (still redacted) diagnostics are mirrored to
+        ``diagnostics/attempts/attempt-<N>.json`` for operator forensics.
+        """
+        if lease_lost.is_set():
+            # Another worker has already taken over; do not race to fail.
+            return
+        code, public_message, resumable, redacted_full = normalize_failure(error)
+        record = self.repository.get(run_id)
+        attempt = record.attempt if record is not None else 1
+        self.repository.fail(
+            run_id,
+            code=code,
+            message=public_message,
+            resumable=resumable,
+            details={"error_type": type(error).__name__, "full_message": redacted_full},
+        )
+        try:
+            self.publisher.save_attempt_diagnostics(
+                run_id,
+                attempt,
+                error_type=type(error).__name__,
+                message=redacted_full,
+            )
+        except OSError:
+            # Diagnostics are best-effort — never fail the run twice
+            # because the diagnostics file could not be written.
+            pass
 
     def _execute(self, record, lease_lost):
         """Call the executor with the lease-lost signal.
