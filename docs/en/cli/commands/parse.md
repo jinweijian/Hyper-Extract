@@ -26,6 +26,10 @@ he parse INPUT [OPTIONS]
 | `--lang` | `-l` | Language: `zh` or `en` (required for knowledge templates) |
 | `--force` | `-f` | Force overwrite existing output |
 | `--no-index` | — | Skip building search index |
+| `--input-format` | — | Input format: `auto`, `text`, `docling-json`, or `document-package` |
+| `--resume / --no-resume` | — | Resume a matching structured-document run |
+| `--model-context-tokens` | — | Model context window used for request budgeting |
+| `--output-reserve-tokens` | — | Tokens reserved for one structured response |
 
 ---
 

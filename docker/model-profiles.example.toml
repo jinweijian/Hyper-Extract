@@ -1,0 +1,8 @@
+[profiles.minimax-course-default]
+llm = "vllm:MiniMax-M2.7-highspeed@https://api.minimaxi.com/v1"
+llm_api_key_env = "MIMIMAX_API_KEY"
+embedder = "vllm:Qwen/Qwen3-Embedding-8B@https://api.siliconflow.cn/v1"
+embedder_api_key_env = "EMBEDDING_API_KEY"
+structured_output_mode = "text_json"
+output_repair_attempts = 1
+request_timeout = 900

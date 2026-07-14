@@ -117,6 +117,7 @@ def get_template_from_ka(ka_path: Path) -> Tuple[str, str]:
         ValueError: If template not found and no local yaml file exists
     """
     from .config import load_ka_metadata
+    from hyperextract.methods.registry import get_method_cfg
     from hyperextract.utils.template_engine import Gallery
 
     metadata = load_ka_metadata(ka_path)
@@ -127,6 +128,9 @@ def get_template_from_ka(ka_path: Path) -> Tuple[str, str]:
     lang = metadata.get("lang")
 
     if template:
+        method_name = template.removeprefix("method/")
+        if template.startswith("method/") and get_method_cfg(method_name) is not None:
+            return template, lang
         if Gallery.get(template) is not None:
             return template, lang
         else:

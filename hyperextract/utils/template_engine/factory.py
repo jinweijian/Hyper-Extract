@@ -81,7 +81,7 @@ class TemplateFactory:
         )
 
         instance.metadata["template"] = f"method/{method_name}"
-        instance.metadata["lang"] = "en"
+        instance.metadata["lang"] = method_info.get("language", "en")
         instance.metadata["type"] = autotype
 
         return instance

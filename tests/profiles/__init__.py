@@ -1,0 +1,1 @@
+"""Course extraction profile tests."""

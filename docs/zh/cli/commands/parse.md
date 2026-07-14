@@ -26,6 +26,18 @@ he parse INPUT [OPTIONS]
 | `--lang` | `-l` | 语言：`zh` 或 `en`（知识模板必填） |
 | `--force` | `-f` | 强制覆盖现有输出 |
 | `--no-index` | — | 跳过构建搜索索引 |
+| `--input-format` | — | 输入格式：`auto`、`text`、`docling-json` 或 `document-package` |
+| `--resume / --no-resume` | — | 恢复匹配的结构化文档任务（默认恢复） |
+| `--chunk-target-tokens` | — | 章节感知块的目标 token 数 |
+| `--chunk-max-tokens` | — | 章节感知块的最大 token 数 |
+| `--max-workers` | — | 最大分块并发数 |
+| `--retry-attempts` | — | 临时 API 错误的最大尝试次数 |
+| `--request-timeout` | — | 单次模型请求超时秒数 |
+| `--heartbeat-interval` | — | 长请求心跳间隔秒数 |
+| `--model-context-tokens` | — | 用于请求预算的模型上下文窗口 |
+| `--output-reserve-tokens` | — | 为单次结构化响应预留的 token 数 |
+| `--semantic-dedup / --no-semantic-dedup` | — | 是否用向量和模型合并同义知识点 |
+| `--community-reports / --no-community-reports` | — | 是否生成模型社区摘要 |
 
 ---
 
@@ -73,7 +85,28 @@ he parse ./documents/ -t general/concept_graph -o ./output/ -l zh
 he parse document.md -m light_rag -o ./output/
 ```
 
-方法始终使用英文提示。
+方法使用各自注册的提示语言。
+
+### 处理课程长文档包
+
+调用方可使用 Docling、本地解析器或远程文档服务生成标准 Document Package。包内必须包含 `manifest.json`、`outline.json`、`provenance.jsonl` 和 manifest 声明的内容文件。
+
+```bash
+he parse ./book.hepkg \
+  -m course_knowledge_graph \
+  -o ./book-course-graph \
+  --input-format document-package \
+  --resume \
+  --chunk-target-tokens 4000 \
+  --chunk-max-tokens 6000 \
+  --max-workers 2 \
+  --retry-attempts 4 \
+  --no-index
+```
+
+HE 会在模型调用前验证包协议、路径安全、哈希、目录树和来源映射。任务状态保存在 `.he-run/`；进程中断后执行同一命令会跳过已完成的节点与关系抽取。包内容、模型、提示词或切片参数变化时会拒绝错误续跑。
+
+旧有 Docling JSON 可使用 `--input-format docling-json` 直读，建议仅用于迁移和兼容验证。
 
 ### 强制覆盖
 
@@ -115,6 +148,8 @@ cat document.md | he parse - -t general/biography_graph -o ./output/ -l zh
     ├── index.faiss
     └── docstore.json
 ```
+
+`course_knowledge_graph` 还会输出 `outline.json`、`source-map.json`、`merge-log.json`、`quality-report.json`、`community_data.json`、`course-graph.json` 和 `run-summary.json`。
 
 ---
 

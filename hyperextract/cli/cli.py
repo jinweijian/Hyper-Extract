@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from typing import Optional
+import os
 
 import typer
 from rich.console import Console
@@ -26,7 +27,7 @@ from .config import (
     load_ka_metadata,
 )
 
-from .commands import list_app, config_app
+from .commands import config_app, evaluate_app, list_app, profile_app
 
 console = Console()
 logger = get_logger("he")
@@ -40,6 +41,8 @@ app = typer.Typer(
 
 app.add_typer(list_app, name="list")
 app.add_typer(config_app, name="config")
+app.add_typer(profile_app, name="profile")
+app.add_typer(evaluate_app, name="evaluate")
 
 
 @app.callback()
@@ -239,6 +242,76 @@ def parse(
     no_index: bool = typer.Option(
         False, "--no-index", help="Skip building search index"
     ),
+    input_format: str = typer.Option(
+        "auto",
+        "--input-format",
+        help="Input format: auto, text, docling-json, or document-package",
+    ),
+    resume: bool = typer.Option(
+        True, "--resume/--no-resume", help="Resume a matching structured-document run"
+    ),
+    chunk_target_tokens: int = typer.Option(
+        4000, "--chunk-target-tokens", help="Target tokens per section-aware chunk"
+    ),
+    chunk_max_tokens: int = typer.Option(
+        6000, "--chunk-max-tokens", help="Maximum tokens per section-aware chunk"
+    ),
+    max_workers: int = typer.Option(
+        2, "--max-workers", help="Maximum concurrent chunk extractions"
+    ),
+    retry_attempts: int = typer.Option(
+        4, "--retry-attempts", help="Attempts for transient model/API failures"
+    ),
+    request_timeout: int = typer.Option(
+        900, "--request-timeout", help="Timeout in seconds for one model request"
+    ),
+    heartbeat_interval: int = typer.Option(
+        30, "--heartbeat-interval", help="Seconds between long-running heartbeats"
+    ),
+    model_context_tokens: int = typer.Option(
+        32768,
+        "--model-context-tokens",
+        help="Model context window used for request budgeting",
+    ),
+    output_reserve_tokens: int = typer.Option(
+        8192,
+        "--output-reserve-tokens",
+        help="Tokens reserved for one structured response",
+    ),
+    semantic_dedup: bool = typer.Option(
+        True,
+        "--semantic-dedup/--no-semantic-dedup",
+        help="Use embeddings and model checks to merge synonymous knowledge points",
+    ),
+    community_reports: bool = typer.Option(
+        False,
+        "--community-reports/--no-community-reports",
+        help="Generate model-written community summaries",
+    ),
+    combined_local_extraction: bool = typer.Option(
+        False,
+        "--combined-local-extraction/--separate-local-extraction",
+        help="Extract chunk nodes and local edges in one structured model call",
+    ),
+    global_edge_top_k: int = typer.Option(
+        1,
+        "--global-edge-top-k",
+        min=0,
+        max=10,
+        help="Maximum cross-section relation candidates retained per node",
+    ),
+    global_edge_similarity_threshold: float = typer.Option(
+        0.70,
+        "--global-edge-similarity-threshold",
+        min=0.0,
+        max=1.0,
+        help="Minimum embedding similarity for global relation candidates",
+    ),
+    course_profile: Optional[str] = typer.Option(
+        None,
+        "--profile",
+        help="CourseExtractionProfile YAML (course_knowledge_graph only)",
+    ),
 ):
     """Extract knowledge from text to a new directory."""
     logger.info(
@@ -262,11 +335,15 @@ def parse(
     is_method_template = template.startswith("method/")
 
     if is_method_template:
-        if lang is not None:
+        method_config = Template.get(template)
+        method_language = (
+            getattr(method_config, "language", "en") if method_config else "en"
+        )
+        if lang is not None and lang != method_language:
             console.print(
-                "[dim]Note: Method templates use English prompts. --lang parameter is ignored.[/dim]"
+                f"[dim]Note: This method uses {method_language} prompts. --lang is ignored.[/dim]"
             )
-        lang = "en"
+        lang = method_language
     elif lang is None:
         console.print(
             "[red]Error:[/red] --lang is required for knowledge templates. Use --lang en or --lang zh."
@@ -275,7 +352,18 @@ def parse(
 
     output_path = Path(output)
 
-    if output_path.exists() and not force:
+    input_path = Path(input)
+    structured_course_run = template == "method/course_knowledge_graph" and (
+        input_format in {"docling-json", "document-package"}
+        or (input_format == "auto" and str(input).lower().endswith(".json"))
+        or (
+            input_format == "auto"
+            and input_path.is_dir()
+            and (input_path / "manifest.json").is_file()
+        )
+    )
+
+    if output_path.exists() and not force and not (structured_course_run and resume):
         if any(output_path.iterdir()):
             console.print(
                 "[red]Error:[/red] Output directory already exists and is not empty. Use --force to overwrite."
@@ -301,7 +389,93 @@ def parse(
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 
-    input_path = Path(input)
+    if structured_course_run:
+        if input_format == "document-package" and not input_path.is_dir():
+            console.print(
+                "[red]Error:[/red] Document Package input must be a directory."
+            )
+            raise typer.Exit(1)
+        if input_format == "docling-json" and not input_path.is_file():
+            console.print("[red]Error:[/red] Docling JSON input must be a file.")
+            raise typer.Exit(1)
+        os.environ["HYPER_EXTRACT_REQUEST_TIMEOUT"] = str(max(1, request_timeout))
+        try:
+            from hyperextract.documents.course_pipeline import (
+                PipelineOptions,
+                run_course_document,
+            )
+            from hyperextract.documents.document_package import (
+                validate_document_package,
+            )
+            from hyperextract.methods.rag.course_knowledge_graph import (
+                CourseKnowledgeGraph,
+            )
+            from hyperextract.profiles.course import load_course_profile
+
+            resolved_package_input = input_format == "document-package" or (
+                input_format == "auto"
+                and input_path.is_dir()
+                and (input_path / "manifest.json").is_file()
+            )
+            if resolved_package_input:
+                validate_document_package(input_path)
+                console.print("[green]Document Package validated.[/green]")
+            else:
+                console.print(
+                    "[yellow]Migration note:[/yellow] docling-json is a compatibility input; "
+                    "new integrations should produce a Document Package."
+                )
+            ka = Template.create(template, lang, max_workers=1)
+            if not isinstance(ka, CourseKnowledgeGraph):
+                raise TypeError(
+                    "course_knowledge_graph method did not create the expected graph type"
+                )
+            if course_profile:
+                loaded_profile = load_course_profile(course_profile)
+                ka.apply_profile(loaded_profile)
+                console.print(
+                    "[green]Course profile:[/green] "
+                    f"{loaded_profile.name} v{loaded_profile.version} "
+                    f"({loaded_profile.content_hash[:12]})"
+                )
+            summary = run_course_document(
+                input_path,
+                output_path,
+                ka,
+                options=PipelineOptions(
+                    target_tokens=chunk_target_tokens,
+                    max_tokens=chunk_max_tokens,
+                    max_workers=max_workers,
+                    retry_attempts=retry_attempts,
+                    heartbeat_interval=heartbeat_interval,
+                    build_index=not no_index,
+                    model_context_tokens=model_context_tokens,
+                    output_reserve_tokens=output_reserve_tokens,
+                    semantic_dedup=semantic_dedup,
+                    community_reports=community_reports,
+                    combined_local_extraction=combined_local_extraction,
+                    global_edge_top_k=global_edge_top_k,
+                    global_edge_similarity_threshold=global_edge_similarity_threshold,
+                ),
+                input_format=input_format,
+                resume=resume,
+                force=force,
+            )
+        except KeyboardInterrupt:
+            console.print(
+                "\n[yellow]Interrupted. Checkpoint saved; run the same command to resume.[/yellow]"
+            )
+            raise typer.Exit(130)
+        except Exception as error:
+            console.print(f"[red]Error:[/red] {error}")
+            console.print(f"[dim]Result: {output_path / 'run-summary.json'}[/dim]")
+            raise typer.Exit(1)
+        console.print()
+        console.print(
+            f"[bold green]Success![/bold green] {summary['nodes']} nodes / {summary['edges']} edges"
+        )
+        console.print(f"[dim]Output: {output_path}[/dim]")
+        return
 
     with Progress(
         SpinnerColumn(),

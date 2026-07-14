@@ -84,6 +84,10 @@ plugins:
                     - cli/commands/config.md
                 - cli/configuration.md
             - MCP Server: mcp.md
+            - Guides:
+                - Document Package: guides/document-package.md
+                - Course Extraction Profile: guides/course-extraction-profile.md
+                - Internal Service: guides/internal-service.md
             - Python SDK:
                 - python/index.md
                 - python/quickstart.md
@@ -177,6 +181,10 @@ plugins:
                     - zh/cli/commands/config.md
                 - zh/cli/configuration.md
             - MCP 服务器: zh/mcp.md
+            - 使用指南:
+                - Document Package: zh/guides/document-package.md
+                - 课程抽取 Profile: zh/guides/course-extraction-profile.md
+                - 内部服务: zh/guides/internal-service.md
             - Python SDK:
                 - zh/python/index.md
                 - zh/python/quickstart.md

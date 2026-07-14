@@ -9,6 +9,7 @@ from .hypergraph_rag import HyperGraph_RAG
 from .cog_rag import Cog_RAG
 from .light_rag import Light_RAG
 from .graph_rag import Graph_RAG
+from .course_knowledge_graph import CourseKnowledgeGraph
 
 __all__ = [
     "Hyper_RAG",
@@ -16,4 +17,5 @@ __all__ = [
     "Cog_RAG",
     "Light_RAG",
     "Graph_RAG",
+    "CourseKnowledgeGraph",
 ]

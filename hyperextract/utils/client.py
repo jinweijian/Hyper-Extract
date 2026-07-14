@@ -362,6 +362,9 @@ def create_llm(
         api_key=config["api_key"] or os.environ.get("OPENAI_API_KEY", ""),
         base_url=config.get("base_url") or None,
         temperature=config.get("temperature", 0),
+        timeout=config.get("timeout"),
+        max_retries=config.get("max_retries", 2),
+        max_tokens=config.get("max_tokens"),
     )
 
 
@@ -522,6 +525,11 @@ def get_client(config_path: str | Path = None) -> Tuple[BaseChatModel, Embedding
             "model": llm_config.model,
             "base_url": llm_config.base_url,
             "api_key": llm_config.api_key,
+            "timeout": float(os.environ.get("HYPER_EXTRACT_REQUEST_TIMEOUT", "900")),
+            "max_retries": 0,
+            "max_tokens": int(
+                os.environ.get("HYPER_EXTRACT_MAX_OUTPUT_TOKENS", "8192")
+            ),
         }
     )
 

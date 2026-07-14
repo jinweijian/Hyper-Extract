@@ -1,0 +1,129 @@
+profile_version: 1
+name: course-knowledge-default
+version: 1.1.0
+language: zh
+description: 通用、无产品品牌的课程知识图谱抽取规则。
+
+knowledge_points:
+  definition: 可独立学习、解释或测评，并且由正文明确讲授的最小稳定知识单元
+  levels: [point, sub_point]
+  kinds: [concept, principle, method, process, tool, model, rule]
+  inclusion_rules:
+    - 判断正文是否明确讲授概念、原则、方法、流程、工具、模型或规则
+    - 判断候选是否具有可陈述的定义、作用、步骤、组成、适用条件或辨析边界
+    - 判断候选是否可以形成独立学习目标或一道有明确答案的题目
+    - 使用当前目录路径和邻近上下文确定候选的规范名称与目录归属
+    - 逐一复核当前块覆盖的目录，避免因多个目录合并而遗漏；每项都要根据正文判断抽取或跳过，目录可以没有直属知识点
+    - 正文明确定义一个有名称的框架、职能、流程、维度或类别时，保留其规范名称，不要只合并到更宽泛的上级摘要中
+  exclusion_rules:
+    - 章、节和小节标题本身属于目录结构，不能仅因标题存在而复制成知识点；但标题指向的概念、方法或流程被正文实质定义时，可以用规范概念名抽取
+    - 人物、部门、普通动作、字段值、孤立例子、叙事对象和泛化能力词不是知识点
+    - 目录、索引、页眉页脚、参考文献、过渡段、案例叙事和习题本身不抽取
+    - 没有直接正文证据，或只能通过常识推断的候选不抽取
+    - 不将同一知识点的同义改写、说明句或多个属性重复创建为节点
+  granularity_rules:
+    - point 必须能形成独立学习或测评目标
+    - sub_point 必须是某个知识点的组成、步骤、属性、条件、分类或局部机制
+    - 脱离上级后语义不完整的候选必须标为 sub_point 并给出 parent_knowledge_name
+    - 一个并列列表只有在每项均被正文分别定义或解释时才拆分
+    - 正文明确列出并分别解释多个评估维度、方法类型或流程环节时，抽取上级知识点，并把各项作为 point 或 sub_point 保留
+    - 目录分组下没有直接正文时允许该目录没有直属知识点
+  positive_examples:
+    - name: 需求变更控制
+      level: point
+      reason: 正文可独立解释其目标、触发条件和处理流程
+    - name: 风险应对策略
+      level: point
+      reason: 可形成独立学习目标并具有明确分类或适用条件
+    - name: 风险规避
+      level: sub_point
+      reason: 是风险应对策略中的一种方法，脱离上级分类后边界不完整
+  negative_examples:
+    - name: 项目管理
+      reason: 仅是宽泛主题且颗粒度过大
+    - name: 团队成员
+      reason: 是叙事参与者，不是正文讲授的知识机制
+    - name: 第三章 项目工作
+      reason: 是目录节点，应由结构图保存
+    - name: 沟通能力
+      reason: 如果正文没有定义、方法或测评边界，只是泛化能力词
+
+relations:
+  prerequisite:
+    directed: true
+    definition: source 是理解或执行 target 不可缺少的基础知识，方向为基础到目标
+    evidence_required: true
+    positive_examples:
+      - source: 概率基础
+        target: 定量风险分析
+        reason: 后者的计算与解释以概率概念为必要前提
+    negative_examples:
+      - source: 项目团队
+        target: 项目风险
+        reason: 同属项目管理主题不构成学习依赖
+  derivative:
+    directed: true
+    definition: target 是 source 的明确应用、推广、组合或进阶形式，方向为基础到应用
+    evidence_required: true
+    positive_examples:
+      - source: 迭代开发
+        target: 增量交付
+        reason: 正文明确说明如何由迭代成果形成逐步交付
+    negative_examples:
+      - source: 成本管理
+        target: 进度管理
+        reason: 并列知识领域不构成发展关系
+  related:
+    directed: false
+    definition: 两个知识点存在正文明确表达的协同理解关系，但不存在必要前提或发展方向
+    evidence_required: true
+    positive_examples:
+      - source: 质量保证
+        target: 质量控制
+        reason: 正文明确对照二者在质量管理中的互补作用
+    negative_examples:
+      - source: 项目组合
+        target: 项目团队
+        reason: 仅在同一本教材出现或主题相近不足以建立关系
+  confusable:
+    directed: false
+    definition: 两个知识点表面相似且正文给出需要辨析的共同点与关键区别
+    evidence_required: true
+    positive_examples:
+      - source: 风险
+        target: 问题
+        reason: 二者均影响项目，但一个是不确定事件，另一个是已经发生的状态
+    negative_examples:
+      - source: 输入
+        target: 输出
+        reason: 相互关联但并不相似，不属于易混淆关系
+
+content_policies:
+  body: extract
+  glossary: definitions_only
+  index: skip
+  table_of_contents: skip
+  header_footer: skip
+  appendix: skip
+  references: skip
+
+quality_rules:
+  require_evidence: true
+  require_parent_outline: true
+  reject_unknown_outline: true
+  reject_unknown_endpoints: true
+  reject_self_loops: true
+  reject_duplicate_edges: true
+  reject_relation_without_evidence: true
+  canonicalize_undirected_edges: true
+  maximum_name_characters: 40
+  minimum_evidence_characters: 4
+
+evaluation_thresholds:
+  required_recall: 0.85
+  effective_precision: 0.90
+  extractable_outline_coverage: 0.85
+  forbidden_leakage_rate: 0.0
+  duplicate_rate: 0.05
+  relation_precision: 0.80
+  annotator_agreement: 0.80

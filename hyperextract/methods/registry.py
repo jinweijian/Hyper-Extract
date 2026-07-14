@@ -16,6 +16,7 @@ def register_method(
     method_class: Type,
     autotype: str,
     description: str = "",
+    language: str = "en",
 ) -> None:
     """Register a method in the registry.
 
@@ -29,6 +30,7 @@ def register_method(
         "class": method_class,
         "type": autotype,
         "description": description,
+        "language": language,
     }
 
 
@@ -59,6 +61,7 @@ class MethodCfg(BaseModel):
     name: str
     type: str
     description: str = ""
+    language: str = "en"
 
 
 def get_method_cfg(name: str) -> Optional[MethodCfg]:
@@ -77,6 +80,7 @@ def get_method_cfg(name: str) -> Optional[MethodCfg]:
         name=name,
         type=info["type"],
         description=info["description"],
+        language=info.get("language", "en"),
     )
 
 
@@ -91,6 +95,7 @@ def list_method_cfgs() -> Dict[str, MethodCfg]:
             name=name,
             type=info["type"],
             description=info["description"],
+            language=info.get("language", "en"),
         )
         for name, info in _METHOD_REGISTRY.items()
     }
@@ -104,8 +109,17 @@ def _init_registry():
         HyperGraph_RAG,
         Cog_RAG,
         Graph_RAG,
+        CourseKnowledgeGraph,
     )
     from hyperextract.methods.typical import iText2KG, iText2KG_Star, KG_Gen, Atom
+
+    register_method(
+        name="course_knowledge_graph",
+        method_class=CourseKnowledgeGraph,
+        autotype="graph",
+        description="Section-aware course knowledge graph extraction for long documents",
+        language="zh",
+    )
 
     register_method(
         name="graph_rag",

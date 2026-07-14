@@ -2,8 +2,10 @@
 
 import os
 import json
+import re
 import tomllib
 import tomli_w
+from dotenv import load_dotenv
 from pathlib import Path
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
@@ -11,6 +13,8 @@ from dataclasses import dataclass
 
 DEFAULT_CONFIG_DIR = Path.home() / ".he"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.toml"
+
+load_dotenv(override=False)
 
 # Provider presets: base_url and default models for each provider
 PROVIDER_PRESETS: Dict[str, Dict[str, str | None]] = {
@@ -47,6 +51,18 @@ PROVIDER_API_KEY_ENV: Dict[str, tuple] = {
     "anthropic": ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY"),
     "claude": ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY"),
 }
+
+
+def _named_route(kind: str) -> Dict[str, str]:
+    profile = os.environ.get(f"HYPER_EXTRACT_{kind}_PROFILE", "").strip().upper()
+    if not profile:
+        return {}
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]*", profile):
+        raise ValueError(f"Invalid HYPER_EXTRACT_{kind}_PROFILE: {profile}")
+    return {
+        field.lower(): os.environ.get(f"{profile}_{field}", "")
+        for field in ("MODEL", "API_KEY", "BASE_URL")
+    }
 
 
 def _env_api_key(provider: str) -> str:
@@ -161,27 +177,57 @@ class ConfigManager:
 
     def get_llm_config(self) -> LLMConfig:
         """Get LLM config with environment variable fallback."""
+        route = _named_route("LLM")
+        model = (
+            route.get("model")
+            or os.environ.get("HYPER_EXTRACT_LLM_MODEL", "")
+            or self.llm.model
+        )
+        api_key = (
+            route.get("api_key")
+            or os.environ.get("HYPER_EXTRACT_LLM_API_KEY", "")
+            or self.llm.api_key
+            or _env_api_key(self.llm.provider)
+        )
+        base_url = (
+            route.get("base_url")
+            or os.environ.get("HYPER_EXTRACT_LLM_BASE_URL", "")
+            or self.llm.base_url
+            or os.environ.get("OPENAI_BASE_URL", "")
+        )
         config = LLMConfig(
             provider=self.llm.provider,
-            model=self.llm.model,
-            api_key=self.llm.api_key or _env_api_key(self.llm.provider),
-            base_url=self._resolve_base_url(
-                self.llm.provider,
-                self.llm.base_url or os.environ.get("OPENAI_BASE_URL", ""),
-            ),
+            model=model,
+            api_key=api_key,
+            base_url=self._resolve_base_url(self.llm.provider, base_url),
         )
         return config
 
     def get_embedder_config(self) -> EmbedderConfig:
         """Get Embedder config with environment variable fallback."""
+        route = _named_route("EMBEDDING")
+        model = (
+            route.get("model")
+            or os.environ.get("HYPER_EXTRACT_EMBEDDING_MODEL", "")
+            or self.embedder.model
+        )
+        api_key = (
+            route.get("api_key")
+            or os.environ.get("HYPER_EXTRACT_EMBEDDING_API_KEY", "")
+            or self.embedder.api_key
+            or _env_api_key(self.embedder.provider)
+        )
+        base_url = (
+            route.get("base_url")
+            or os.environ.get("HYPER_EXTRACT_EMBEDDING_BASE_URL", "")
+            or self.embedder.base_url
+            or os.environ.get("OPENAI_BASE_URL", "")
+        )
         config = EmbedderConfig(
             provider=self.embedder.provider,
-            model=self.embedder.model,
-            api_key=self.embedder.api_key or _env_api_key(self.embedder.provider),
-            base_url=self._resolve_base_url(
-                self.embedder.provider,
-                self.embedder.base_url or os.environ.get("OPENAI_BASE_URL", ""),
-            ),
+            model=model,
+            api_key=api_key,
+            base_url=self._resolve_base_url(self.embedder.provider, base_url),
         )
         return config
 
