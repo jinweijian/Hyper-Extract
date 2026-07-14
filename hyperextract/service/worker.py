@@ -56,9 +56,7 @@ class ServiceWorker:
             self.repository.mark_cancelled(record.run_id, self.worker_id)
             return True
 
-        heartbeat_thread = self._start_heartbeat_thread(
-            record.run_id, lease_lost
-        )
+        heartbeat_thread = self._start_heartbeat_thread(record.run_id, lease_lost)
         try:
             # Before model execution, reconcile any previously published
             # artifacts. A worker may have crashed *after* publishing but
@@ -67,9 +65,7 @@ class ServiceWorker:
             # invalid publication is fatal (ARTIFACT_STATE_INCONSISTENT)
             # and is NEVER overwritten.
             try:
-                published_manifest = self.publisher.inspect_published(
-                    record.run_id
-                )
+                published_manifest = self.publisher.inspect_published(record.run_id)
             except ValueError as error:
                 self._handle_failure(record.run_id, error, lease_lost)
                 return True
@@ -167,6 +163,7 @@ class ServiceWorker:
         worker), ``lease_lost`` is set so the executor can stop at the next
         control check and skip artifact publishing.
         """
+
         def _heartbeat():
             while not lease_lost.is_set():
                 # Use Event.wait so we wake up immediately when lease_lost

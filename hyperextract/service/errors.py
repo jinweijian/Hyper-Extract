@@ -60,13 +60,11 @@ def redact_secrets(text: str) -> str:
         # replace only the credential portion.
         full = match.group(0)
         keyword = match.group(1)
-        return full.replace(full[len(keyword):].lstrip(" := "), _REDACTED, 1)
+        return full.replace(full[len(keyword) :].lstrip(" := "), _REDACTED, 1)
 
     text = _BEARER_PATTERN.sub(_bearer_replacement, text)
     text = _API_KEY_PATTERN.sub("sk-" + _REDACTED, text)
-    text = _KEY_VALUE_PATTERN.sub(
-        lambda m: f"{m.group(1)}={_REDACTED}", text
-    )
+    text = _KEY_VALUE_PATTERN.sub(lambda m: f"{m.group(1)}={_REDACTED}", text)
     return text
 
 

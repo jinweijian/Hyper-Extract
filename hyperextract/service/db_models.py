@@ -71,9 +71,7 @@ class RunAttemptEntity(Base):
     __table_args__ = (
         # Ensures only one row per (run, attempt number) — required for replaying
         # attempt history and for stable recovery semantics.
-        UniqueConstraint(
-            "run_id", "attempt", name="uq_he_run_attempts_run_attempt"
-        ),
+        UniqueConstraint("run_id", "attempt", name="uq_he_run_attempts_run_attempt"),
     )
 
 

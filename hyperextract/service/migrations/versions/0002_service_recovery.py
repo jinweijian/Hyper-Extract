@@ -23,12 +23,8 @@ def upgrade() -> None:
         sa.Column("status", sa.String(24), nullable=False),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("ended_at", sa.DateTime(timezone=True), nullable=True),
-        sa.ForeignKeyConstraint(
-            ["run_id"], ["he_runs.run_id"], ondelete="CASCADE"
-        ),
-        sa.UniqueConstraint(
-            "run_id", "attempt", name="uq_he_run_attempts_run_attempt"
-        ),
+        sa.ForeignKeyConstraint(["run_id"], ["he_runs.run_id"], ondelete="CASCADE"),
+        sa.UniqueConstraint("run_id", "attempt", name="uq_he_run_attempts_run_attempt"),
     )
 
     op.create_table(
@@ -41,9 +37,7 @@ def upgrade() -> None:
         sa.Column("message", sa.String(512), nullable=False),
         sa.Column("details_json", sa.JSON(), nullable=True),
         sa.Column("occurred_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(
-            ["run_id"], ["he_runs.run_id"], ondelete="CASCADE"
-        ),
+        sa.ForeignKeyConstraint(["run_id"], ["he_runs.run_id"], ondelete="CASCADE"),
     )
     op.create_index("ix_he_run_errors_run_id", "he_run_errors", ["run_id"])
 

@@ -34,9 +34,7 @@ def create_runtime(
     resolved = settings or ServiceSettings.from_env()
     owned_engine = None
     if repository is None:
-        owned_engine, session_factory = create_engine_and_session(
-            resolved.database_url
-        )
+        owned_engine, session_factory = create_engine_and_session(resolved.database_url)
         repository = RunRepository(session_factory)
     return ServiceRuntime(
         settings=resolved,

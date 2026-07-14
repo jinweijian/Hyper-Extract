@@ -76,9 +76,7 @@ class ModelProfileRegistry:
             llm_api_key_env=str(raw["llm_api_key_env"]),
             embedder=str(raw["embedder"]),
             embedder_api_key_env=str(raw["embedder_api_key_env"]),
-            structured_output_mode=str(
-                raw.get("structured_output_mode", "text_json")
-            ),
+            structured_output_mode=str(raw.get("structured_output_mode", "text_json")),
             output_repair_attempts=int(raw.get("output_repair_attempts", 1)),
             request_timeout=int(raw.get("request_timeout", 900)),
             max_tokens=int(raw["max_tokens"]) if raw.get("max_tokens") else None,

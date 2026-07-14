@@ -7,7 +7,10 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header
 
-from hyperextract.documents import document_package_fingerprint, validate_document_package
+from hyperextract.documents import (
+    document_package_fingerprint,
+    validate_document_package,
+)
 from hyperextract.documents.checkpoint import fingerprint
 from hyperextract.service.commands import RunCommand
 from hyperextract.service.contracts import (
@@ -155,9 +158,7 @@ def create_run(
 
 
 @router.get("/v1/runs/{run_id}", response_model=RunResponse)
-def get_run(
-    run_id: str, runtime: ServiceRuntime = Depends(get_runtime)
-) -> RunResponse:
+def get_run(run_id: str, runtime: ServiceRuntime = Depends(get_runtime)) -> RunResponse:
     record = _run_or_404(runtime.repository, run_id)
     return _public_run(record, runtime.storage.output_locations(run_id))
 
@@ -170,7 +171,9 @@ def cancel_run(
     try:
         record = runtime.repository.request_cancel(run_id)
     except InvalidRunState as error:
-        raise ServiceError(409, "RUN_NOT_CANCELLABLE", "Run cannot be cancelled") from error
+        raise ServiceError(
+            409, "RUN_NOT_CANCELLABLE", "Run cannot be cancelled"
+        ) from error
     return _public_run(record, runtime.storage.output_locations(run_id))
 
 
@@ -191,9 +194,7 @@ def resume_run(
 
 
 @router.get("/v1/runs/{run_id}/artifacts")
-def artifacts(
-    run_id: str, runtime: ServiceRuntime = Depends(get_runtime)
-) -> dict:
+def artifacts(run_id: str, runtime: ServiceRuntime = Depends(get_runtime)) -> dict:
     record = _run_or_404(runtime.repository, run_id)
     if record.status != "completed":
         raise ServiceError(409, "ARTIFACTS_NOT_READY", "Run artifacts are not ready")

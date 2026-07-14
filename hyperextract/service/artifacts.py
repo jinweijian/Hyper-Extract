@@ -157,16 +157,16 @@ class ArtifactPublisher:
         self._verify_every_declared_artifact(artifacts, manifest)
         return manifest
 
-    def _verify_marker_manifest_hash(
-        self, marker: Path, manifest_path: Path
-    ) -> None:
+    def _verify_marker_manifest_hash(self, marker: Path, manifest_path: Path) -> None:
         try:
             marker_data = json.loads(marker.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
             raise ValueError("ARTIFACT_STATE_INCONSISTENT") from error
-        declared_sha = marker_data.get("manifest_sha256") if isinstance(
-            marker_data, dict
-        ) else None
+        declared_sha = (
+            marker_data.get("manifest_sha256")
+            if isinstance(marker_data, dict)
+            else None
+        )
         if not isinstance(declared_sha, str):
             raise ValueError("ARTIFACT_STATE_INCONSISTENT")
         actual_sha = _sha256(manifest_path)
