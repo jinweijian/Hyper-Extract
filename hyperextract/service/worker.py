@@ -10,6 +10,7 @@ from hyperextract.documents.course_pipeline import RunCancelled
 
 from .artifacts import ArtifactPublisher
 from .errors import normalize_failure
+from .repository import LeaseOwnershipLost
 from .settings import ServiceSettings
 
 _WORKER_VERSION = "1.0.0"
@@ -53,7 +54,10 @@ class ServiceWorker:
         lease_lost = threading.Event()
 
         if record.cancel_requested:
-            self.repository.mark_cancelled(record.run_id, self.worker_id)
+            try:
+                self.repository.mark_cancelled(record.run_id, self.worker_id)
+            except LeaseOwnershipLost:
+                lease_lost.set()
             return True
 
         heartbeat_thread = self._start_heartbeat_thread(record.run_id, lease_lost)
@@ -75,6 +79,7 @@ class ServiceWorker:
                     return True
                 self.repository.complete(
                     record.run_id,
+                    self.worker_id,
                     {
                         "status": "completed",
                         "reconciled_from_published_artifacts": True,
@@ -83,11 +88,17 @@ class ServiceWorker:
                 return True
 
             summary = self._execute(record, lease_lost)
+        except LeaseOwnershipLost:
+            lease_lost.set()
+            return True
         except RunCancelled:
             # If the lease was lost, another worker or requeue_expired_leases
             # has already taken over — do NOT call mark_cancelled or publish.
             if not lease_lost.is_set():
-                self.repository.mark_cancelled(record.run_id, self.worker_id)
+                try:
+                    self.repository.mark_cancelled(record.run_id, self.worker_id)
+                except LeaseOwnershipLost:
+                    lease_lost.set()
             return True
         except Exception as error:
             self._handle_failure(record.run_id, error, lease_lost)
@@ -96,8 +107,15 @@ class ServiceWorker:
             # Only publish and complete if the lease is still ours.
             if lease_lost.is_set():
                 return True
-            self.publisher.publish(record, summary)
-            self.repository.complete(record.run_id, summary)
+            try:
+                self.repository.complete(
+                    record.run_id,
+                    self.worker_id,
+                    summary,
+                    before_complete=lambda: self.publisher.publish(record, summary),
+                )
+            except LeaseOwnershipLost:
+                lease_lost.set()
             return True
         finally:
             lease_lost.set()  # signal the heartbeat thread to stop
@@ -121,13 +139,21 @@ class ServiceWorker:
         code, public_message, resumable, redacted_full = normalize_failure(error)
         record = self.repository.get(run_id)
         attempt = record.attempt if record is not None else 1
-        self.repository.fail(
-            run_id,
-            code=code,
-            message=public_message,
-            resumable=resumable,
-            details={"error_type": type(error).__name__, "full_message": redacted_full},
-        )
+        try:
+            self.repository.fail(
+                run_id,
+                worker_id=self.worker_id,
+                code=code,
+                message=public_message,
+                resumable=resumable,
+                details={
+                    "error_type": type(error).__name__,
+                    "full_message": redacted_full,
+                },
+            )
+        except LeaseOwnershipLost:
+            lease_lost.set()
+            return
         try:
             self.publisher.save_attempt_diagnostics(
                 run_id,
@@ -171,12 +197,20 @@ class ServiceWorker:
                 # for the full heartbeat_seconds.
                 if lease_lost.wait(timeout=self.settings.heartbeat_seconds):
                     return
-                if not self.repository.renew_lease(
-                    run_id, self.worker_id, self.settings.lease_seconds
-                ):
+                try:
+                    renewed = self.repository.renew_lease(
+                        run_id, self.worker_id, self.settings.lease_seconds
+                    )
+                    if renewed:
+                        self.repository.heartbeat_worker(
+                            self.worker_id, _WORKER_VERSION
+                        )
+                except Exception:
                     lease_lost.set()
                     return
-                self.repository.heartbeat_worker(self.worker_id, _WORKER_VERSION)
+                if not renewed:
+                    lease_lost.set()
+                    return
 
         thread = threading.Thread(target=_heartbeat, daemon=True)
         thread.start()

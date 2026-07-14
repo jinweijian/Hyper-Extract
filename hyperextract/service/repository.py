@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -21,6 +22,10 @@ class IdempotencyConflict(RuntimeError):
 
 class InvalidRunState(RuntimeError):
     pass
+
+
+class LeaseOwnershipLost(InvalidRunState):
+    """Raised when a Worker no longer owns a live lease for a run."""
 
 
 @dataclass(frozen=True)
@@ -58,6 +63,14 @@ class RunErrorRecord:
     occurred_at: datetime
 
 
+@dataclass(frozen=True)
+class RunAttemptRecord:
+    attempt: int
+    status: str
+    started_at: datetime
+    ended_at: datetime | None
+
+
 def _record(row: RunEntity) -> RunRecord:
     return RunRecord(
         run_id=row.run_id,
@@ -85,6 +98,15 @@ def _error_record(row: RunErrorEntity) -> RunErrorRecord:
         source=row.source,
         message=row.message,
         occurred_at=row.occurred_at,
+    )
+
+
+def _attempt_record(row: RunAttemptEntity) -> RunAttemptRecord:
+    return RunAttemptRecord(
+        attempt=row.attempt,
+        status=row.status,
+        started_at=row.started_at,
+        ended_at=row.ended_at,
     )
 
 
@@ -133,6 +155,53 @@ class RunRepository:
             row = session.get(RunEntity, run_id)
             return _record(row) if row else None
 
+    @staticmethod
+    def _set_attempt(
+        session,
+        row: RunEntity,
+        *,
+        status: str,
+        ended_at: datetime | None = None,
+        started_at: datetime | None = None,
+    ) -> RunAttemptEntity:
+        attempt = session.scalar(
+            select(RunAttemptEntity).where(
+                RunAttemptEntity.run_id == row.run_id,
+                RunAttemptEntity.attempt == row.attempt,
+            )
+        )
+        if attempt is None:
+            attempt = RunAttemptEntity(
+                run_id=row.run_id,
+                attempt=row.attempt,
+                status=status,
+                started_at=started_at or row.created_at or utcnow(),
+                ended_at=ended_at,
+            )
+            session.add(attempt)
+        else:
+            attempt.status = status
+            attempt.ended_at = ended_at
+        return attempt
+
+    @staticmethod
+    def _owned_running_row(session, run_id: str, worker_id: str) -> RunEntity:
+        now = utcnow()
+        row = session.scalar(
+            select(RunEntity)
+            .where(
+                RunEntity.run_id == run_id,
+                RunEntity.status == "running",
+                RunEntity.lease_owner == worker_id,
+                RunEntity.lease_expires_at.isnot(None),
+                RunEntity.lease_expires_at >= now,
+            )
+            .with_for_update()
+        )
+        if row is None:
+            raise LeaseOwnershipLost(run_id)
+        return row
+
     def claim_next(self, worker_id: str, lease_seconds: int = 120):
         with self.session_factory.begin() as session:
             # First, re-claim runs already owned by this worker that have
@@ -164,14 +233,26 @@ class RunRepository:
             row.status = "running"
             row.stage_status = "recovering" if row.resume_from_checkpoint else "running"
             row.lease_owner = worker_id
-            row.lease_expires_at = utcnow() + timedelta(seconds=lease_seconds)
+            claimed_at = utcnow()
+            row.lease_expires_at = claimed_at + timedelta(seconds=lease_seconds)
+            self._set_attempt(
+                session,
+                row,
+                status="running",
+                started_at=claimed_at,
+            )
             return _record(row)
 
-    def update_progress(self, run_id: str, *, stage: str, progress: dict):
+    def update_progress(
+        self,
+        run_id: str,
+        worker_id: str,
+        *,
+        stage: str,
+        progress: dict,
+    ):
         with self.session_factory.begin() as session:
-            row = session.get(RunEntity, run_id)
-            if row is None:
-                raise KeyError(run_id)
+            row = self._owned_running_row(session, run_id, worker_id)
             row.stage = stage
             row.stage_status = "running"
             row.progress_json = progress
@@ -186,6 +267,12 @@ class RunRepository:
             if row.status == "queued":
                 row.status = "cancelled"
                 row.stage_status = "cancelled"
+                self._set_attempt(
+                    session,
+                    row,
+                    status="cancelled",
+                    ended_at=utcnow(),
+                )
             elif row.status != "running":
                 raise InvalidRunState(row.status)
             return _record(row)
@@ -194,6 +281,7 @@ class RunRepository:
         self,
         run_id: str,
         *,
+        worker_id: str | None = None,
         code: str,
         message: str,
         resumable: bool,
@@ -209,9 +297,16 @@ class RunRepository:
         """
         occurred_at = datetime.now(timezone.utc)
         with self.session_factory.begin() as session:
-            row = session.get(RunEntity, run_id)
+            if worker_id is not None:
+                row = self._owned_running_row(session, run_id, worker_id)
+            else:
+                row = session.get(RunEntity, run_id, with_for_update=True)
             if row is None:
                 raise KeyError(run_id)
+            if row.status == "running" and worker_id is None:
+                raise LeaseOwnershipLost(run_id)
+            if row.status in {"completed", "cancelled", "failed"}:
+                raise InvalidRunState(row.status)
             attempt_number = row.attempt
             row.status = "failed"
             row.stage_status = "failed"
@@ -219,14 +314,11 @@ class RunRepository:
             row.resumable = resumable
             row.lease_owner = None
             row.lease_expires_at = None
-            session.add(
-                RunAttemptEntity(
-                    run_id=run_id,
-                    attempt=attempt_number,
-                    status="failed",
-                    started_at=row.created_at,
-                    ended_at=occurred_at,
-                )
+            self._set_attempt(
+                session,
+                row,
+                status="failed",
+                ended_at=occurred_at,
             )
             session.add(
                 RunErrorEntity(
@@ -254,17 +346,46 @@ class RunRepository:
             ).all()
             return [_error_record(row) for row in rows]
 
-    def complete(self, run_id: str, summary: dict):
+    def list_attempts(self, run_id: str) -> list[RunAttemptRecord]:
+        with self.session_factory() as session:
+            rows = session.scalars(
+                select(RunAttemptEntity)
+                .where(RunAttemptEntity.run_id == run_id)
+                .order_by(RunAttemptEntity.attempt)
+            ).all()
+            return [_attempt_record(row) for row in rows]
+
+    def complete(
+        self,
+        run_id: str,
+        worker_id: str,
+        summary: dict,
+        *,
+        before_complete: Callable[[], object] | None = None,
+    ):
+        """Publish and complete while holding the owned run's row lock.
+
+        ``before_complete`` is used for the filesystem publication step. The
+        row lock is acquired only after checking the live lease, which gives
+        publication and the terminal database transition one linearization
+        point relative to lease recovery and claims by another Worker.
+        """
         with self.session_factory.begin() as session:
-            row = session.get(RunEntity, run_id)
-            if row is None:
-                raise KeyError(run_id)
+            row = self._owned_running_row(session, run_id, worker_id)
+            if before_complete is not None:
+                before_complete()
             row.status = "completed"
             row.stage = "completed"
             row.stage_status = "completed"
             row.progress_json = summary
             row.lease_owner = None
             row.lease_expires_at = None
+            self._set_attempt(
+                session,
+                row,
+                status="completed",
+                ended_at=utcnow(),
+            )
             return _record(row)
 
     def resume(self, run_id: str):
@@ -295,15 +416,17 @@ class RunRepository:
         ``cancel_requested_at``).
         """
         with self.session_factory.begin() as session:
-            row = session.get(RunEntity, run_id, with_for_update=True)
-            if row is None:
-                raise KeyError(run_id)
-            if row.status != "running" or row.lease_owner != worker_id:
-                raise InvalidRunState(row.status)
+            row = self._owned_running_row(session, run_id, worker_id)
             row.status = "cancelled"
             row.stage_status = "cancelled"
             row.lease_owner = None
             row.lease_expires_at = None
+            self._set_attempt(
+                session,
+                row,
+                status="cancelled",
+                ended_at=utcnow(),
+            )
             return _record(row)
 
     def renew_lease(self, run_id: str, worker_id: str, lease_seconds: int) -> bool:
@@ -321,6 +444,8 @@ class RunRepository:
                     RunEntity.run_id == run_id,
                     RunEntity.status == "running",
                     RunEntity.lease_owner == worker_id,
+                    RunEntity.lease_expires_at.isnot(None),
+                    RunEntity.lease_expires_at >= now,
                 )
                 .values(lease_expires_at=now + timedelta(seconds=lease_seconds))
             )
@@ -382,6 +507,12 @@ class RunRepository:
                 if row.cancel_requested_at is not None:
                     row.status = "cancelled"
                     row.stage_status = "cancelled"
+                    self._set_attempt(
+                        session,
+                        row,
+                        status="cancelled",
+                        ended_at=now,
+                    )
                 elif row.recovery_count >= max_recoveries:
                     row.status = "failed"
                     row.stage_status = "failed"
@@ -390,11 +521,32 @@ class RunRepository:
                         "code": "WORKER_RECOVERY_EXHAUSTED",
                         "message": "Worker recovery limit was reached",
                     }
+                    self._set_attempt(
+                        session,
+                        row,
+                        status="failed",
+                        ended_at=now,
+                    )
+                    session.add(
+                        RunErrorEntity(
+                            run_id=row.run_id,
+                            attempt=row.attempt,
+                            code="WORKER_RECOVERY_EXHAUSTED",
+                            source="recovery",
+                            message="Worker recovery limit was reached",
+                            occurred_at=now,
+                        )
+                    )
                 else:
                     row.status = "queued"
                     row.stage_status = "recovering"
                     row.recovery_count += 1
                     row.resume_from_checkpoint = True
+                    self._set_attempt(
+                        session,
+                        row,
+                        status="recovering",
+                    )
                     recovered.append(row.run_id)
         return recovered
 

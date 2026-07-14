@@ -42,23 +42,31 @@ def test_concurrent_create_or_get_returns_single_row():
     database_url = os.environ["HE_TEST_POSTGRES_URL"]
     repository, engine = _make_repository(database_url)
     try:
-        command = RunCommand(
-            run_id="run_concurrent",
-            request_fingerprint=hashlib.sha256(b"request").hexdigest(),
-            request_json={"input": {}},
-            output_uri="file:///exchange/runs/run_concurrent/",
-        )
+        fingerprint = hashlib.sha256(b"request").hexdigest()
+        commands = [
+            RunCommand(
+                run_id=f"run_concurrent_{index}",
+                request_fingerprint=fingerprint,
+                request_json={"input": {}},
+                output_uri=f"file:///exchange/runs/run_concurrent_{index}/",
+            )
+            for index in range(2)
+        ]
         idempotency_key = "concurrent-key"
 
         results: list[tuple[str, bool]] = []
         lock = threading.Lock()
+        barrier = threading.Barrier(2)
 
-        def worker():
+        def worker(command):
+            barrier.wait()
             record, created = repository.create_or_get(command, idempotency_key)
             with lock:
                 results.append((record.run_id, created))
 
-        threads = [threading.Thread(target=worker) for _ in range(2)]
+        threads = [
+            threading.Thread(target=worker, args=(command,)) for command in commands
+        ]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -66,7 +74,8 @@ def test_concurrent_create_or_get_returns_single_row():
 
         assert len(results) == 2
         # Both threads must observe the same run_id
-        assert results[0][0] == results[1][0] == "run_concurrent"
+        assert results[0][0] == results[1][0]
+        assert results[0][0] in {command.run_id for command in commands}
         # Exactly one thread reports ``created=True``
         created_flags = [created for _, created in results]
         assert created_flags.count(True) == 1
@@ -91,5 +100,54 @@ def test_concurrent_create_or_get_returns_single_row():
 
             session.execute(
                 delete(RunEntity).where(RunEntity.idempotency_key == "concurrent-key")
+            )
+        engine.dispose()
+
+
+def test_stale_worker_cannot_complete_after_postgres_reclaim():
+    from datetime import timedelta
+
+    import pytest
+
+    from hyperextract.service.commands import RunCommand
+    from hyperextract.service.db_models import RunEntity, utcnow
+    from hyperextract.service.repository import LeaseOwnershipLost
+
+    database_url = os.environ["HE_TEST_POSTGRES_URL"]
+    repository, engine = _make_repository(database_url)
+    run_id = "run_postgres_stale_owner"
+    idempotency_key = "postgres-stale-owner-key"
+    try:
+        repository.create_or_get(
+            RunCommand(
+                run_id=run_id,
+                request_fingerprint="a" * 64,
+                request_json={"input": {}},
+                output_uri=f"file:///exchange/runs/{run_id}/",
+            ),
+            idempotency_key,
+        )
+        repository.claim_next("worker-old", lease_seconds=120)
+        with repository.session_factory.begin() as session:
+            row = session.get(RunEntity, run_id)
+            row.lease_expires_at = utcnow() - timedelta(seconds=1)
+
+        repository.requeue_expired_leases(max_recoveries=3)
+        claimed = repository.claim_next("worker-new", lease_seconds=120)
+        assert claimed.run_id == run_id
+
+        with pytest.raises(LeaseOwnershipLost):
+            repository.complete(run_id, "worker-old", {"stale": True})
+        current = repository.get(run_id)
+        assert current.status == "running"
+        assert current.lease_owner == "worker-new"
+    finally:
+        with repository.session_factory.begin() as session:
+            from sqlalchemy import delete
+
+            from hyperextract.service.db_models import RunEntity
+
+            session.execute(
+                delete(RunEntity).where(RunEntity.idempotency_key == idempotency_key)
             )
         engine.dispose()

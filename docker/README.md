@@ -70,8 +70,9 @@ docker run --rm -v hyper-extract-exchange:/exchange alpine \
   chown -R 10001:10001 /exchange
 ```
 
-and rely on `umask 0002` (set in the image) so group-writable artifacts are
-shared cleanly between the service and callers running as UID 10001.
+The image entrypoint sets `umask 0002` before starting API, Worker or migration
+commands, so files are created as `0664` and directories as `0775`. This keeps
+artifacts group-writable for cooperating processes in GID 10001.
 
 ## Configuration
 
@@ -89,6 +90,10 @@ cp docker/.env.example docker/.env
 it, so it never sees model secrets. The same file supplies the interpolation
 variables (`POSTGRES_PASSWORD`, `EXCHANGE_VOLUME_NAME`, `API_NETWORK_NAME`,
 `HE_API_PORT`, `PLATFORM`, `HE_IMAGE`, `MODEL_PROFILES_FILE`).
+
+`HE_IMAGE` names the image built from `docker/service.Dockerfile`; the same tag
+is used by migration, API and Worker so Compose builds one service image for
+all three roles.
 
 Both the API and the Worker mount the same Model Profile TOML at
 `/run/config/model-profiles.toml`. The API computes the secret-free Profile
@@ -137,8 +142,9 @@ kill healthy work. Instead the Worker publishes a database heartbeat and renews
 its task lease on an independent thread. A Worker that stops heartbeating is
 detected by lease expiry, not by an HTTP probe. The 90-second stop grace
 period lets in-flight model calls drain on `docker compose stop` before the
-container is force-killed; lease renewal stops during shutdown so an expired
-lease can be recovered by another replica.
+container is force-killed. Lease renewal continues while an in-flight call is
+draining, then stops when the Worker exits; another replica can recover the
+run after the final lease expires.
 
 ## Scaling Workers
 
@@ -152,7 +158,10 @@ docker compose --env-file docker/.env -f docker/service.compose.yml \
 ```
 
 Crashed Workers' expired leases are requeued with `resume_from_checkpoint=true`
-up to a bounded recovery count. Do not set `container_name` on scaled services.
+up to a bounded recovery count. Every progress, failure, cancellation,
+publication and completion transition verifies the live lease owner under a
+database row lock, so a stale Worker cannot overwrite a replacement Worker.
+Do not set `container_name` on scaled services.
 
 ## Destructive operations — read carefully
 
@@ -171,9 +180,9 @@ cleans up via a `trap` — it never touches operator data.
 | `down --volumes` | yes, only its own resources | **never** against production |
 | Provider keys | empty (no model calls) | real keys in `docker/.env` |
 
-The smoke script verifies readiness, shared-volume visibility and restart
-persistence **without submitting a real extraction run**. Run it from the repo
-root:
+The smoke script verifies readiness, shared-volume visibility, restart
+persistence, and a new Worker heartbeat after restart **without submitting a
+real extraction run**. Run it from the repo root:
 
 ```sh
 sh scripts/service-compose-smoke.sh

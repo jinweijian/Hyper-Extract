@@ -57,6 +57,7 @@ class CourseRunExecutor:
         def event_sink(event):
             self.repository.update_progress(
                 record.run_id,
+                record.lease_owner,
                 stage=event.stage,
                 progress={
                     "status": event.status,

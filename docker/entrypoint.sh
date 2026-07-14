@@ -20,4 +20,9 @@ if [ -d /exchange ] && [ ! -r /exchange ]; then
     exit 1
 fi
 
+# Files and directories created on the shared volume must remain writable by
+# other processes in GID 10001. This is process state, so it must be set by the
+# entrypoint rather than documented as an image ENV setting.
+umask 0002
+
 exec "$@"

@@ -2,15 +2,14 @@
 #
 # HyperExtract service image — hardened, lockfile-based, non-root.
 #
-# Build stage uses a pinned `ghcr.io/astral-sh/uv` image to resolve
+# Build stage uses a version-pinned `ghcr.io/astral-sh/uv` image to resolve
 # dependencies strictly from `uv.lock` (no pip, no network resolution).
 # Runtime stage is a minimal `python:3.11-slim` image running as UID/GID 10001.
 
 # ===== Build stage: resolve dependencies with pinned uv =====
-# The version-less `python3.11-bookworm-slim` tag tracks a uv release that
-# understands the current `uv.lock` revision; versioned 0.11.x tags are not
-# published with this suffix on GHCR.
-FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS builder
+# Keep this tag explicit so rebuilding the same commit cannot silently change
+# the uv resolver/install implementation.
+FROM ghcr.io/astral-sh/uv:0.9.26-python3.11-bookworm-slim AS builder
 
 ENV UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \
@@ -30,7 +29,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --extra service --extra graph-rag
 
 # ===== Runtime stage: slim Python image =====
-FROM python:3.11-slim AS runtime
+FROM python:3.11.15-slim-bookworm AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

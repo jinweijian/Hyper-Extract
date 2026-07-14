@@ -4,7 +4,11 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from hyperextract.service.commands import RunCommand
-from hyperextract.service.repository import IdempotencyConflict, InvalidRunState
+from hyperextract.service.repository import (
+    IdempotencyConflict,
+    InvalidRunState,
+    LeaseOwnershipLost,
+)
 
 
 def command(run_id="run_1", request_fingerprint=None):
@@ -43,6 +47,7 @@ def test_cancel_and_resume_state_machine(repository):
 def test_failure_is_recorded_and_queryable(repository, running_run):
     repository.fail(
         running_run.run_id,
+        worker_id="worker-1",
         code="MODEL_RATE_LIMIT_EXHAUSTED",
         message="Provider request failed after retries",
         resumable=True,
@@ -58,6 +63,7 @@ def test_failure_is_recorded_and_queryable(repository, running_run):
 def test_list_errors_excludes_sensitive_details(repository, running_run):
     repository.fail(
         running_run.run_id,
+        worker_id="worker-1",
         code="MODEL_RATE_LIMIT_EXHAUSTED",
         message="Provider request failed after retries",
         resumable=True,
@@ -96,6 +102,83 @@ def test_active_lease_is_extended_independently_of_pipeline_events(
     before = repository.lease(running_run.run_id).lease_expires_at
     repository.renew_lease(running_run.run_id, "worker-1", lease_seconds=120)
     assert repository.lease(running_run.run_id).lease_expires_at > before
+
+
+def test_expired_lease_cannot_be_renewed(repository, expired_running_run):
+    assert (
+        repository.renew_lease(
+            expired_running_run.run_id,
+            "worker-1",
+            lease_seconds=120,
+        )
+        is False
+    )
+
+
+def test_stale_worker_cannot_mutate_run_after_new_worker_claims(repository):
+    from hyperextract.service.db_models import RunEntity
+
+    run, _ = repository.create_or_get(command("run_stale"), "stale-key")
+    repository.claim_next("worker-old", lease_seconds=120)
+    with repository.session_factory.begin() as session:
+        row = session.get(RunEntity, run.run_id)
+        row.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    repository.requeue_expired_leases(max_recoveries=3)
+    claimed = repository.claim_next("worker-new", lease_seconds=120)
+    assert claimed.run_id == run.run_id
+    assert claimed.lease_owner == "worker-new"
+
+    with pytest.raises(LeaseOwnershipLost):
+        repository.update_progress(
+            run.run_id,
+            "worker-old",
+            stage="stale",
+            progress={"source": "worker-old"},
+        )
+    with pytest.raises(LeaseOwnershipLost):
+        repository.fail(
+            run.run_id,
+            worker_id="worker-old",
+            code="STALE_FAILURE",
+            message="must not win",
+            resumable=True,
+        )
+    with pytest.raises(LeaseOwnershipLost):
+        repository.complete(
+            run.run_id,
+            "worker-old",
+            {"source": "worker-old"},
+        )
+
+    current = repository.get(run.run_id)
+    assert current.status == "running"
+    assert current.lease_owner == "worker-new"
+    assert current.stage != "stale"
+
+
+def test_completed_attempt_is_persisted(repository, running_run):
+    repository.complete(
+        running_run.run_id,
+        "worker-1",
+        {"status": "completed"},
+    )
+
+    attempts = repository.list_attempts(running_run.run_id)
+    assert len(attempts) == 1
+    assert attempts[0].attempt == 1
+    assert attempts[0].status == "completed"
+    assert attempts[0].started_at is not None
+    assert attempts[0].ended_at is not None
+
+
+def test_cancelled_attempt_is_persisted(repository, cancellable_run):
+    repository.mark_cancelled(cancellable_run.run_id, "worker-1")
+
+    attempts = repository.list_attempts(cancellable_run.run_id)
+    assert len(attempts) == 1
+    assert attempts[0].status == "cancelled"
+    assert attempts[0].ended_at is not None
 
 
 def test_mark_cancelled_verifies_lease_owner(repository, cancellable_run):
@@ -194,6 +277,14 @@ def test_requeue_expired_leases_fails_when_recovery_exhausted(repository):
     assert record.status == "failed"
     assert record.resumable is True
     assert record.error_summary["code"] == "WORKER_RECOVERY_EXHAUSTED"
+    errors = repository.list_errors("run_exhausted")
+    assert len(errors) == 1
+    assert errors[0].code == "WORKER_RECOVERY_EXHAUSTED"
+    assert errors[0].source == "recovery"
+    attempts = repository.list_attempts("run_exhausted")
+    assert len(attempts) == 1
+    assert attempts[0].status == "failed"
+    assert attempts[0].ended_at is not None
 
 
 def test_requeue_expired_leases_increments_recovery_count(repository):

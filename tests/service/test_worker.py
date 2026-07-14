@@ -163,6 +163,51 @@ def test_lease_loss_stops_execution_and_prevents_publishing(repository, settings
     assert not artifact_dir.exists()
 
 
+def test_stale_worker_cannot_publish_after_run_is_reclaimed(repository, settings):
+    """The database ownership check must fence a stale worker even when its
+    heartbeat thread has not observed the lease transfer yet."""
+
+    from datetime import datetime, timedelta, timezone
+
+    from hyperextract.service.db_models import RunEntity
+
+    run_id = "run_stale_publish"
+    command = _make_command(
+        run_id,
+        (settings.run_root / run_id).as_uri() + "/",
+    )
+    repository.create_or_get(command, "stale-publish-key")
+    work = settings.run_root / run_id / "work"
+    work.mkdir(parents=True)
+
+    class ReclaimingExecutor:
+        def execute(self, record, *, lease_lost=None):
+            with repository.session_factory.begin() as session:
+                row = session.get(RunEntity, record.run_id)
+                row.lease_expires_at = datetime.now(timezone.utc) - timedelta(
+                    seconds=1
+                )
+            repository.requeue_expired_leases(max_recoveries=3)
+            replacement = repository.claim_next("worker-new", lease_seconds=120)
+            assert replacement.run_id == record.run_id
+            write_graph(work, record.run_id)
+            return {"status": "completed", "source": "worker-old"}
+
+    worker = ServiceWorker(
+        repository,
+        ReclaimingExecutor(),
+        ArtifactPublisher(settings.run_root),
+        settings,
+        worker_id="worker-old",
+    )
+
+    assert worker.run_once() is True
+    current = repository.get(run_id)
+    assert current.status == "running"
+    assert current.lease_owner == "worker-new"
+    assert not (settings.run_root / run_id / "artifacts").exists()
+
+
 def test_worker_requeues_expired_leases_before_claiming(repository, settings):
     """The worker main loop should call requeue_expired_leases() before
     claiming new work."""

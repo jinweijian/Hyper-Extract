@@ -16,6 +16,7 @@ services:
     networks: [database]
 
   he-migrate:
+    image: ${HE_IMAGE:-hyper-extract-service:dev}
     platform: ${PLATFORM:-linux/amd64}
     build:
       context: ..
@@ -30,6 +31,7 @@ services:
     networks: [database]
 
   he-api:
+    image: ${HE_IMAGE:-hyper-extract-service:dev}
     platform: ${PLATFORM:-linux/amd64}
     build:
       context: ..
@@ -58,6 +60,7 @@ services:
     networks: [database, service-api]
 
   he-worker:
+    image: ${HE_IMAGE:-hyper-extract-service:dev}
     platform: ${PLATFORM:-linux/amd64}
     build:
       context: ..

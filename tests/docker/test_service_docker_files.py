@@ -5,6 +5,7 @@ content. They do NOT build the image, so they can run in CI without Docker.
 """
 
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -15,6 +16,16 @@ def test_image_is_lockfile_based_and_non_root():
     assert "uv sync --frozen" in text
     assert "USER 10001:10001" in text
     assert "pip install" not in text
+    uv_image = re.search(r"FROM ghcr\.io/astral-sh/uv:([^ ]+)", text)
+    assert uv_image is not None
+    assert re.match(r"\d+\.\d+\.\d+-python3\.11-bookworm-slim$", uv_image.group(1))
+    assert "FROM python:3.11-slim " not in text
+
+
+def test_entrypoint_sets_group_writable_umask():
+    text = (ROOT / "docker/entrypoint.sh").read_text()
+    assert "umask 0002" in text
+    assert text.index("umask 0002") < text.rindex('exec "$@"')
 
 
 def test_context_excludes_secrets_and_runtime_data():
@@ -65,6 +76,8 @@ def test_compose_migration_is_one_shot_and_postgres_unpublished(compose):
     assert "ports" not in services["postgres"]
     # postgres-data volume must be declared at the top level.
     assert "postgres-data" in compose["volumes"]
+    for name in ("he-migrate", "he-api", "he-worker"):
+        assert services[name]["image"] == "${HE_IMAGE:-hyper-extract-service:dev}"
 
 
 def test_api_has_no_secrets_or_egress_and_worker_does(compose):
@@ -148,6 +161,9 @@ def test_smoke_script_is_isolated_and_cleans_up():
     assert "--project-name" in text
     assert "down --volumes --remove-orphans" in text
     assert "trap " in text
+    assert "before_worker_id" in text
+    assert "after_worker_id" in text
+    assert 'after_worker_id" != "$before_worker_id' in text
 
 
 def test_api_uses_readiness_and_worker_has_shutdown_window(compose):

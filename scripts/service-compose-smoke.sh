@@ -22,6 +22,7 @@ export POSTGRES_PASSWORD="smoke-not-secret"
 export HE_API_PORT="$((18000 + ($$ % 1000)))"
 export PLATFORM="${PLATFORM:-linux/amd64}"
 export MODEL_PROFILES_FILE="./model-profiles.example.toml"
+export HE_IMAGE="$SMOKE_ID-service:dev"
 
 # No provider keys: the smoke must not reach any model endpoint.
 export OPENAI_API_KEY=""
@@ -41,6 +42,7 @@ cleanup() {
     # Remove the uniquely-named exchange volume if it survived.
     docker volume rm "$EXCHANGE_VOLUME_NAME" >/dev/null 2>&1 || true
     docker network rm "$API_NETWORK_NAME" >/dev/null 2>&1 || true
+    docker image rm "$HE_IMAGE" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
@@ -53,6 +55,16 @@ api_ready() {
     $COMPOSE exec -T he-api python -c \
         "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=2).status==200 else 1)" \
         >/dev/null 2>&1
+}
+
+latest_worker_id() {
+    $COMPOSE exec -T postgres psql -U hyperextract -d hyperextract -Atc \
+        "SELECT worker_id FROM he_worker_heartbeats ORDER BY last_seen_at DESC LIMIT 1" \
+        2>/dev/null
+}
+
+worker_running() {
+    $COMPOSE ps --status running --services | grep -qx "he-worker"
 }
 
 echo "smoke: building image"
@@ -93,18 +105,26 @@ echo "smoke: /exchange sentinel shared correctly"
 
 # --- 3. Sentinel survives an API + Worker restart -------------------------
 echo "smoke: restarting he-api and he-worker"
+before_worker_id="$(latest_worker_id)"
+if [ -z "$before_worker_id" ]; then
+    echo "smoke: no Worker heartbeat found before restart" >&2
+    exit 1
+fi
 $COMPOSE restart he-api he-worker >/dev/null
 
 ready=0
+after_worker_id=""
 for _ in $(seq 1 60); do
-    if api_ready; then
+    after_worker_id="$(latest_worker_id || true)"
+    if worker_running && [ -n "$after_worker_id" ] && \
+        [ "$after_worker_id" != "$before_worker_id" ] && api_ready; then
         ready=1
         break
     fi
     sleep 2
 done
 if [ "$ready" -ne 1 ]; then
-    echo "smoke: API did not become ready after restart" >&2
+    echo "smoke: API/Worker did not become ready with a fresh Worker heartbeat after restart" >&2
     exit 1
 fi
 
