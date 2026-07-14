@@ -154,22 +154,60 @@ docker compose --env-file docker/.env -f docker/service.compose.yml \
 Crashed Workers' expired leases are requeued with `resume_from_checkpoint=true`
 up to a bounded recovery count. Do not set `container_name` on scaled services.
 
-## Backup and retention
+## Destructive operations — read carefully
+
+`docker compose down --volumes` **destroys the PostgreSQL database and the
+`/exchange` run state permanently.** The isolated smoke test
+(`scripts/service-compose-smoke.sh`) is the only place that uses
+`down --volumes`, and it does so under a unique project name and volume that it
+cleans up via a `trap` — it never touches operator data.
+
+### Smoke-test cleanup vs. operator data
+
+| Operation | Smoke test | Operator stack |
+|-----------|-----------|----------------|
+| Project name | `he-smoke-<ts>-<pid>` (unique per run) | your stable project |
+| Exchange volume | `he-smoke-<id>-exchange` (removed on exit) | `hyper-extract-exchange` (persistent) |
+| `down --volumes` | yes, only its own resources | **never** against production |
+| Provider keys | empty (no model calls) | real keys in `docker/.env` |
+
+The smoke script verifies readiness, shared-volume visibility and restart
+persistence **without submitting a real extraction run**. Run it from the repo
+root:
+
+```sh
+sh scripts/service-compose-smoke.sh
+```
+
+### Operator backup policy
 
 - **PostgreSQL** — back up with `pg_dump` against the running `postgres`
   service. This holds run state, attempts, error history and leases.
 - **`/exchange/runs`** — back this up only when cross-host resume is required.
   Published artifacts are immutable once `_SUCCESS` is written; a restore
   reconciles without rerunning the model.
-- **`.he-run` Brief/Prompt snapshots** — written under
-  `diagnostics/attempts/` per run. These are operator-debugging snapshots that
-  may contain sensitive prompt material. Apply an explicit retention policy
-  (e.g. prune snapshots older than N days); they are not required for resume.
+- **`.he-run` Brief/Prompt snapshots** — written under `diagnostics/attempts/`
+  per run. These are operator-debugging snapshots that may contain sensitive
+  prompt material. Apply an explicit retention policy (e.g. prune snapshots
+  older than N days); they are not required for resume.
 
-## Destructive operations — read carefully
+## Real-provider acceptance runbook (opt-in, manual)
 
-`docker compose down --volumes` **destroys the PostgreSQL database and the
-`/exchange` run state permanently.** It is only used by the isolated smoke test
-(`scripts/service-compose-smoke.sh`), which runs under a unique project name
-and volume and cleans up only its own resources. Never run
-`down --volumes` against the production project.
+The deterministic smoke test never calls a model. Before a real release,
+perform this manual acceptance once against a small package:
+
+1. Inject the Worker's real provider keys into `docker/.env`
+   (`MIMIMAX_API_KEY`, `EMBEDDING_API_KEY`).
+2. Publish one small immutable Document Package `1.1` (with a Brief) to
+   `/exchange/packages/<name>.hepkg/`.
+3. `POST /v1/document-packages/validate` with `contract_version: "1.1"` and the
+   canonical fingerprint; confirm `200`.
+4. `POST /v1/runs` with the same package and a stable `Idempotency-Key`.
+5. Poll `GET /v1/runs/{run_id}` until `status=completed`.
+6. `GET /v1/runs/{run_id}/artifacts`; verify `_SUCCESS` exists and every
+   declared artifact SHA-256 matches the file on disk.
+7. Inspect `run-summary.json` and confirm `extraction_brief` reflects the
+   package Brief.
+
+Never make this procedure part of deterministic CI — it spends model budget and
+is non-deterministic.

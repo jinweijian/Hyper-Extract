@@ -7,7 +7,10 @@
 # Runtime stage is a minimal `python:3.11-slim` image running as UID/GID 10001.
 
 # ===== Build stage: resolve dependencies with pinned uv =====
-FROM ghcr.io/astral-sh/uv:0.11.28-python3.11-bookworm-slim AS builder
+# The version-less `python3.11-bookworm-slim` tag tracks a uv release that
+# understands the current `uv.lock` revision; versioned 0.11.x tags are not
+# published with this suffix on GHCR.
+FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS builder
 
 ENV UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \

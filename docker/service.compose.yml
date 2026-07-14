@@ -20,7 +20,7 @@ services:
     build:
       context: ..
       dockerfile: docker/service.Dockerfile
-    command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
+    command: ["alembic", "upgrade", "head"]
     restart: "no"
     environment:
       HE_SERVICE_DATABASE_URL: postgresql+psycopg://hyperextract:${POSTGRES_PASSWORD}@postgres/hyperextract
@@ -34,7 +34,7 @@ services:
     build:
       context: ..
       dockerfile: docker/service.Dockerfile
-    command: ["uv", "run", "--no-sync", "he-api"]
+    command: ["he-api"]
     restart: unless-stopped
     stop_grace_period: 20s
     environment:
@@ -62,7 +62,7 @@ services:
     build:
       context: ..
       dockerfile: docker/service.Dockerfile
-    command: ["uv", "run", "--no-sync", "he-worker"]
+    command: ["he-worker"]
     restart: unless-stopped
     stop_grace_period: 90s
     env_file:

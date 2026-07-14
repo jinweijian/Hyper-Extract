@@ -27,9 +27,6 @@ def test_context_excludes_secrets_and_runtime_data():
 def test_compose_has_migration_gate_and_database_volume(compose):
     services = compose["services"]
     assert services["he-migrate"]["command"] == [
-        "uv",
-        "run",
-        "--no-sync",
         "alembic",
         "upgrade",
         "head",
@@ -59,9 +56,11 @@ def test_compose_migration_is_one_shot_and_postgres_unpublished(compose):
         == "service_healthy"
     )
     # API and Worker commands must be ONLY the entrypoint binary — no inline
-    # `alembic upgrade head` chaining, since he-migrate owns migrations.
-    assert services["he-api"]["command"] == ["uv", "run", "--no-sync", "he-api"]
-    assert services["he-worker"]["command"] == ["uv", "run", "--no-sync", "he-worker"]
+    # `alembic upgrade head` chaining, since he-migrate owns migrations. The
+    # runtime image places the venv on PATH, so the binaries run directly
+    # without `uv run`.
+    assert services["he-api"]["command"] == ["he-api"]
+    assert services["he-worker"]["command"] == ["he-worker"]
     # PostgreSQL must never publish ports to the host.
     assert "ports" not in services["postgres"]
     # postgres-data volume must be declared at the top level.
@@ -140,6 +139,15 @@ def test_docker_readme_documents_exchange_and_scaling():
     assert "/exchange" in text
     assert "10001" in text
     assert "--scale he-worker" in text
+
+
+def test_smoke_script_is_isolated_and_cleans_up():
+    text = (ROOT / "scripts" / "service-compose-smoke.sh").read_text()
+    assert "set -eu" in text
+    assert "OPENAI_API_KEY=" in text
+    assert "--project-name" in text
+    assert "down --volumes --remove-orphans" in text
+    assert "trap " in text
 
 
 def test_api_uses_readiness_and_worker_has_shutdown_window(compose):
