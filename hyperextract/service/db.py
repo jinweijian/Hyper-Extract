@@ -17,7 +17,12 @@ def create_engine_and_session(database_url: str, *, for_tests: bool = False):
             "poolclass": StaticPool,
         }
     engine = create_engine(database_url, **options)
-    from . import db_models  # noqa: F401
+    if for_tests:
+        # Production schema ownership belongs exclusively to Alembic
+        # (see the he-migrate Compose service). Tests, however, need the
+        # tables materialised on a fresh in-memory/temporary database, so
+        # only create_all() when explicitly requested.
+        from . import db_models  # noqa: F401
 
-    Base.metadata.create_all(engine)
+        Base.metadata.create_all(engine)
     return engine, sessionmaker(engine, expire_on_commit=False)

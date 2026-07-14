@@ -1,5 +1,4 @@
 services:
   he-api:
     ports:
-      - "127.0.0.1:8000:8000"
-    networks: [hyper_extract_internal, model_egress]
+      - "127.0.0.1:${HE_API_PORT:-8000}:8000"

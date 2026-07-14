@@ -54,6 +54,7 @@ dev = [
     "mike>=2.0",
     "pytest>=9.0.2",
     "httpx>=0.27,<1",
+    "ruff>=0.15.21",
 ]
 
 
@@ -82,7 +83,7 @@ Issues = "https://github.com/yifanfeng97/hyper-extract/issues"
 [project.scripts]
 he = "hyperextract.cli:app"
 he-mcp = "hyperextract.mcp_server:main"
-he-api = "hyperextract.service.app:main"
+he-api = "hyperextract.service.api.main:main"
 he-worker = "hyperextract.service.worker:main"
 
 [build-system]

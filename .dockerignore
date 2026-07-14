@@ -1,0 +1,41 @@
+# Secrets and local environment — never bake into the image.
+.env
+.env.*
+!.env.example
+
+# Git metadata and history.
+.git/
+.gitignore
+.gitattributes
+
+# Runtime exchange data — mounted at runtime, never copied into the image.
+exchange/
+
+# Local worktrees and SDD working state.
+.worktrees/
+.superpowers/
+
+# Tests, docs, and tooling not required at runtime.
+tests/
+docs/
+mkdocs.yml
+docs_hooks.py
+
+# Python caches, virtual environments, and build artifacts.
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+build/
+dist/
+
+# Editor and OS files.
+.DS_Store
+.idea/
+.vscode/
+*.swp

@@ -87,6 +87,7 @@ plugins:
             - Guides:
                 - Document Package: guides/document-package.md
                 - ExtractionBrief: guides/extraction-brief.md
+                - Course Document Pipeline: guides/course-document-pipeline.md
                 - Course Extraction Profile: guides/course-extraction-profile.md
                 - Internal Service: guides/internal-service.md
             - Python SDK:
@@ -185,6 +186,7 @@ plugins:
             - 使用指南:
                 - Document Package: zh/guides/document-package.md
                 - ExtractionBrief: zh/guides/extraction-brief.md
+                - 课程长文档流水线: zh/guides/course-document-pipeline.md
                 - 课程抽取 Profile: zh/guides/course-extraction-profile.md
                 - HE 服务 API 对接: zh/guides/internal-service.md
             - Python SDK:

@@ -5,53 +5,95 @@ services:
     environment:
       POSTGRES_DB: hyperextract
       POSTGRES_USER: hyperextract
-      POSTGRES_PASSWORD: hyperextract-local
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U hyperextract"]
       interval: 5s
       timeout: 3s
       retries: 20
-    networks: [hyper_extract_internal]
+    networks: [database]
+
+  he-migrate:
+    image: ${HE_IMAGE:-hyper-extract-service:dev}
+    platform: ${PLATFORM:-linux/amd64}
+    build:
+      context: ..
+      dockerfile: docker/service.Dockerfile
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    environment:
+      HE_SERVICE_DATABASE_URL: postgresql+psycopg://hyperextract:${POSTGRES_PASSWORD}@postgres/hyperextract
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [database]
 
   he-api:
+    image: ${HE_IMAGE:-hyper-extract-service:dev}
     platform: ${PLATFORM:-linux/amd64}
     build:
       context: ..
       dockerfile: docker/service.Dockerfile
-    command: ["sh", "-c", "uv run --no-sync alembic upgrade head && uv run --no-sync he-api"]
+    command: ["he-api"]
+    restart: unless-stopped
+    stop_grace_period: 20s
     environment:
-      HE_SERVICE_DATABASE_URL: postgresql+psycopg://hyperextract:hyperextract-local@postgres/hyperextract
+      HE_SERVICE_DATABASE_URL: postgresql+psycopg://hyperextract:${POSTGRES_PASSWORD}@postgres/hyperextract
       HE_SERVICE_EXCHANGE_ROOT: /exchange
+      HE_SERVICE_MODEL_PROFILES: /run/config/model-profiles.toml
     volumes:
-      - hyper_extract_exchange:/exchange
+      - exchange-data:/exchange
+      - ${MODEL_PROFILES_FILE:-./model-profiles.example.toml}:/run/config/model-profiles.toml:ro
     depends_on:
       postgres:
         condition: service_healthy
-    networks: [hyper_extract_internal]
+      he-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://127.0.0.1:8000/health/ready',timeout=2).status==200 else 1)\""]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 3
+    networks: [database, service-api]
 
   he-worker:
+    image: ${HE_IMAGE:-hyper-extract-service:dev}
     platform: ${PLATFORM:-linux/amd64}
     build:
       context: ..
       dockerfile: docker/service.Dockerfile
-    command: ["uv", "run", "--no-sync", "he-worker"]
-    env_file: ../.env
+    command: ["he-worker"]
+    restart: unless-stopped
+    stop_grace_period: 90s
+    env_file:
+      - path: .env
+        required: false
     environment:
-      HE_SERVICE_DATABASE_URL: postgresql+psycopg://hyperextract:hyperextract-local@postgres/hyperextract
+      HE_SERVICE_DATABASE_URL: postgresql+psycopg://hyperextract:${POSTGRES_PASSWORD}@postgres/hyperextract
       HE_SERVICE_EXCHANGE_ROOT: /exchange
-      HE_SERVICE_MODEL_PROFILES: /app/config/model-profiles.toml
+      HE_SERVICE_MODEL_PROFILES: /run/config/model-profiles.toml
     volumes:
-      - hyper_extract_exchange:/exchange
-      - ./model-profiles.example.toml:/app/config/model-profiles.toml:ro
+      - exchange-data:/exchange
+      - ${MODEL_PROFILES_FILE:-./model-profiles.example.toml}:/run/config/model-profiles.toml:ro
     depends_on:
       postgres:
         condition: service_healthy
-    networks: [hyper_extract_internal, model_egress]
+      he-migrate:
+        condition: service_completed_successfully
+    networks: [database, model-egress]
 
 volumes:
-  hyper_extract_exchange:
+  exchange-data:
+    name: ${EXCHANGE_VOLUME_NAME:-hyper-extract-exchange}
+  postgres-data:
 
 networks:
-  hyper_extract_internal:
+  database:
     internal: true
-  model_egress: {}
+  service-api:
+    name: ${API_NETWORK_NAME:-hyper-extract-api}
+    internal: true
+  model-egress: {}

@@ -16,7 +16,7 @@ book.hepkg/
     0002.md
 ```
 
-`manifest.json` 使用 `HyperExtractDocumentPackage` `1.0`，声明文档、生产者、目录文件、来源文件以及每个内容文件的顺序、类型、目录归属、SHA-256、字节数和 `extract` 策略。`outline.json` 使用 `HyperExtractOutline` `1.0`。HE 会在模型调用前校验版本、路径边界、符号链接、哈希、大小、重复 ID、父节点、目录环和内容引用；未声明文件不参与处理。
+`manifest.json` 使用 `HyperExtractDocumentPackage` `1.0` 或 `1.1`，声明文档、生产者、目录文件、来源文件以及每个内容文件的顺序、类型、目录归属、SHA-256、字节数和 `extract` 策略；Package 1.1 还包含 `extraction-brief.yaml`。`outline.json` 使用 `HyperExtractOutline` `1.0`。HE 会在模型调用前校验版本、路径边界、符号链接、哈希、大小、重复 ID、父节点、目录环和内容引用；未声明文件不参与处理。
 
 Docling JSON 直读仍作为兼容入口，但它把解析器适配逻辑放进 HE，新的生产接入应优先使用 Document Package。
 
@@ -49,7 +49,7 @@ uv run he parse ./book.hepkg \
 4. `deduplicate`：全书精确去重、向量召回同义候选、模型判定同义项。
 5. `global_edges`：补充跨章节的前置、相关、衍生和易混关系。
 6. `quality`：检查章节覆盖、关系分布和悬空边。
-7. `communities`：运行 Louvain 社区检测，并按社区生成主题摘要。
+7. `communities`：运行 Louvain 社区检测，并可选地按社区生成主题摘要。
 8. `finalize`：写入 Hyper-Extract 原生数据和课程图谱产物。
 
 ## 检查点与监控

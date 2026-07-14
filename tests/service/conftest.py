@@ -4,6 +4,8 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+from hyperextract.documents import document_package_fingerprint
+
 
 def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -85,6 +87,14 @@ def package_path(exchange_root):
 
 
 @pytest.fixture
+def package_v1_1(package_path):
+    from tests.documents.test_document_package import _add_extraction_brief
+
+    _add_extraction_brief(package_path)
+    return package_path
+
+
+@pytest.fixture
 def settings(exchange_root):
     from hyperextract.service.settings import ServiceSettings
 
@@ -106,8 +116,88 @@ def repository():
 
 
 @pytest.fixture
-def client(settings, repository):
-    from hyperextract.service.app import create_app
+def running_run(repository):
+    from hyperextract.service.commands import RunCommand
+
+    command = RunCommand(
+        run_id="run_running",
+        request_fingerprint="a" * 64,
+        request_json={"input": {}},
+        output_uri="file:///exchange/runs/run_running/",
+    )
+    repository.create_or_get(command, "running-key")
+    return repository.claim_next("worker-1", lease_seconds=120)
+
+
+@pytest.fixture
+def cancellable_run(repository):
+    """A running run owned by ``worker-1`` that can be cancelled mid-flight."""
+    from hyperextract.service.commands import RunCommand
+
+    command = RunCommand(
+        run_id="run_cancellable",
+        request_fingerprint="c" * 64,
+        request_json={"input": {}},
+        output_uri="file:///exchange/runs/run_cancellable/",
+    )
+    repository.create_or_get(command, "cancellable-key")
+    return repository.claim_next("worker-1", lease_seconds=120)
+
+
+@pytest.fixture
+def expired_running_run(repository):
+    """A running run whose lease has already expired (crashed worker scenario)."""
+    from datetime import datetime, timedelta, timezone
+
+    from hyperextract.service.commands import RunCommand
+    from hyperextract.service.db_models import RunEntity
+
+    command = RunCommand(
+        run_id="run_expired",
+        request_fingerprint="e" * 64,
+        request_json={"input": {}},
+        output_uri="file:///exchange/runs/run_expired/",
+    )
+    repository.create_or_get(command, "expired-key")
+    repository.claim_next("worker-1", lease_seconds=120)
+    with repository.session_factory.begin() as session:
+        row = session.get(RunEntity, "run_expired")
+        row.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=60)
+    return repository.get("run_expired")
+
+
+@pytest.fixture
+def worker(repository, settings):
+    """A ServiceWorker with a fake executor that raises RunCancelled.
+
+    Used by lifecycle tests in ``test_repository.py`` to verify that a
+    cancellable running run ends up as ``cancelled`` after the worker
+    processes it.
+    """
+    from hyperextract.documents.course_pipeline import RunCancelled
+    from hyperextract.service.artifacts import ArtifactPublisher
+    from hyperextract.service.worker import ServiceWorker
+
+    class CancelExecutor:
+        def execute(self, record):
+            raise RunCancelled("Cancellation requested")
+
+    return ServiceWorker(
+        repository,
+        CancelExecutor(),
+        ArtifactPublisher(settings.run_root),
+        settings,
+        worker_id="worker-1",
+    )
+
+
+@pytest.fixture
+def failed_run(repository, package_path, settings):
+    """Create a run through the API then mark it failed with attempt history."""
+    from fastapi.testclient import TestClient
+
+    from hyperextract.service.api.app import create_app
+    from hyperextract.service.runtime import create_runtime
 
     class FakeProfiles:
         def public_descriptor(self, name):
@@ -115,11 +205,57 @@ def client(settings, repository):
                 raise KeyError(name)
             return {"name": name, "fingerprint": "b" * 64}
 
-    with TestClient(
-        create_app(
-            settings=settings,
-            repository=repository,
-            model_profiles=FakeProfiles(),
+    runtime = create_runtime(
+        settings=settings,
+        repository=repository,
+        model_profiles=FakeProfiles(),
+    )
+    with TestClient(create_app(runtime=runtime)) as api_client:
+        payload = {
+            "input": {
+                "type": "document_package",
+                "contract_version": "1.0",
+                "package_uri": package_path.as_uri(),
+                "package_format": "directory",
+                "sha256": document_package_fingerprint(package_path),
+            },
+            "pipeline": {
+                "name": "course_graph",
+                "profile": {"name": "course_knowledge_graph", "version": "1"},
+            },
+            "execution": {"model_profile": "minimax-course-default"},
+        }
+        response = api_client.post(
+            "/v1/runs", headers={"Idempotency-Key": "failed"}, json=payload
         )
-    ) as value:
+        run_id = response.json()["run_id"]
+        repository.fail(
+            run_id,
+            code="RUN_EXECUTION_FAILED",
+            message="Extraction pipeline failed",
+            resumable=False,
+            source="worker",
+        )
+        from types import SimpleNamespace
+
+        yield SimpleNamespace(run_id=run_id)
+
+
+@pytest.fixture
+def client(settings, repository):
+    from hyperextract.service.api.app import create_app
+    from hyperextract.service.runtime import create_runtime
+
+    class FakeProfiles:
+        def public_descriptor(self, name):
+            if name != "minimax-course-default":
+                raise KeyError(name)
+            return {"name": name, "fingerprint": "b" * 64}
+
+    runtime = create_runtime(
+        settings=settings,
+        repository=repository,
+        model_profiles=FakeProfiles(),
+    )
+    with TestClient(create_app(runtime=runtime)) as value:
         yield value

@@ -124,3 +124,84 @@ class ArtifactPublisher:
         finally:
             if staging.exists():
                 shutil.rmtree(staging)
+
+    def inspect_published(self, run_id: str) -> ArtifactManifest | None:
+        """Reconcile a previously published artifact set.
+
+        Returns the validated :class:`ArtifactManifest` if a consistent
+        publication exists for ``run_id``. Returns ``None`` when no
+        publication has been attempted (neither ``_SUCCESS`` nor
+        ``artifact-manifest.json`` exists). Raises
+        ``ValueError("ARTIFACT_STATE_INCONSISTENT")`` when the publication
+        is partial or fails hash/content verification — the caller must
+        NEVER overwrite a partial publication.
+
+        Correctness contract:
+        * Both ``_SUCCESS`` and ``artifact-manifest.json`` must exist as files.
+        * The ``manifest_sha256`` recorded in ``_SUCCESS`` must match the
+          actual sha256 of ``artifact-manifest.json``.
+        * Every artifact declared in the manifest must exist on disk with the
+          declared size and sha256.
+        """
+        artifacts = self.run_root / run_id / "artifacts"
+        marker = artifacts / "_SUCCESS"
+        manifest_path = artifacts / "artifact-manifest.json"
+        if not marker.exists() and not manifest_path.exists():
+            return None
+        if not marker.is_file() or not manifest_path.is_file():
+            raise ValueError("ARTIFACT_STATE_INCONSISTENT")
+        manifest = ArtifactManifest.model_validate_json(
+            manifest_path.read_text(encoding="utf-8")
+        )
+        self._verify_marker_manifest_hash(marker, manifest_path)
+        self._verify_every_declared_artifact(artifacts, manifest)
+        return manifest
+
+    def _verify_marker_manifest_hash(self, marker: Path, manifest_path: Path) -> None:
+        try:
+            marker_data = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError("ARTIFACT_STATE_INCONSISTENT") from error
+        declared_sha = (
+            marker_data.get("manifest_sha256")
+            if isinstance(marker_data, dict)
+            else None
+        )
+        if not isinstance(declared_sha, str):
+            raise ValueError("ARTIFACT_STATE_INCONSISTENT")
+        actual_sha = _sha256(manifest_path)
+        if declared_sha != actual_sha:
+            raise ValueError("ARTIFACT_STATE_INCONSISTENT")
+
+    def _verify_every_declared_artifact(
+        self, artifacts: Path, manifest: ArtifactManifest
+    ) -> None:
+        for entry in manifest.artifacts:
+            path = artifacts / entry.path
+            if not path.is_file():
+                raise ValueError("ARTIFACT_STATE_INCONSISTENT")
+            if path.stat().st_size != entry.size:
+                raise ValueError("ARTIFACT_STATE_INCONSISTENT")
+            if _sha256(path) != entry.sha256:
+                raise ValueError("ARTIFACT_STATE_INCONSISTENT")
+
+    def save_attempt_diagnostics(
+        self, run_id: str, attempt: int, *, error_type: str, message: str
+    ) -> Path:
+        """Persist detailed (redacted) diagnostics for a failed attempt.
+
+        Diagnostics land under ``<run>/diagnostics/attempts/attempt-<N>.json``
+        and never appear in the public API response — that surface only
+        carries the ``message`` column from ``he_run_errors``.
+        """
+        diagnostics_dir = self.run_root / run_id / "diagnostics" / "attempts"
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "run_id": run_id,
+            "attempt": attempt,
+            "error_type": error_type,
+            "error_message": message,
+        }
+        path = diagnostics_dir / f"attempt-{attempt}.json"
+        _write_sync(path, json.dumps(payload, indent=2, sort_keys=True))
+        return path

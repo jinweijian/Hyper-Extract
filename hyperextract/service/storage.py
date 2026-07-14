@@ -34,6 +34,8 @@ class SharedVolumeStore:
         parsed = urlparse(uri)
         if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
             raise ValueError("DOCUMENT_PACKAGE_URI_MUST_USE_FILE")
+        if parsed.query or parsed.fragment:
+            raise ValueError("DOCUMENT_PACKAGE_URI_INVALID")
         candidate = Path(unquote(parsed.path))
         if _contains_symlink(candidate, self.package_root):
             raise ValueError("DOCUMENT_PACKAGE_PATH_FORBIDDEN")

@@ -30,10 +30,10 @@ class CourseRunExecutor:
             community_reports=False,
         )
 
-    def execute(self, record) -> dict[str, object]:
+    def execute(self, record, *, lease_lost=None) -> dict[str, object]:
         request = record.request_json
         execution = request.get("execution") or {}
-        profile = self.registry.get(
+        profile = self.registry.resolve_runtime(
             str(execution.get("model_profile", "minimax-course-default"))
         )
         llm_kwargs = {"timeout": profile.request_timeout, "max_retries": 0}
@@ -57,6 +57,7 @@ class CourseRunExecutor:
         def event_sink(event):
             self.repository.update_progress(
                 record.run_id,
+                record.lease_owner,
                 stage=event.stage,
                 progress={
                     "status": event.status,
@@ -67,6 +68,11 @@ class CourseRunExecutor:
                     "details": event.details,
                 },
             )
+
+        def should_cancel():
+            if lease_lost is not None and lease_lost.is_set():
+                return True
+            return bool(self.repository.get(record.run_id).cancel_requested)
 
         return run_course_document(
             package,
@@ -79,8 +85,6 @@ class CourseRunExecutor:
             control=PipelineControl(
                 run_id=record.run_id,
                 event_sink=event_sink,
-                should_cancel=lambda: bool(
-                    self.repository.get(record.run_id).cancel_requested
-                ),
+                should_cancel=should_cancel,
             ),
         )
