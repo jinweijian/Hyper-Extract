@@ -38,6 +38,7 @@ class OutputTruncatedError(ModelInvocationError):
 
 
 class OutputValidationError(ModelInvocationError):
+    retryable = True
     category = "output_validation"
 
 

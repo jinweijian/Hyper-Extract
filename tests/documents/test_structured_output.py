@@ -8,6 +8,7 @@ from hyperextract.documents.model_errors import (
     AuthenticationModelError,
     ContextWindowExceededError,
     OutputTruncatedError,
+    OutputValidationError,
     RateLimitModelError,
     TransientModelError,
     classify_model_error,
@@ -130,3 +131,10 @@ def test_auto_mode_falls_back_to_plain_json_only_for_unsupported_capability():
 )
 def test_model_errors_have_stable_categories(error, expected):
     assert isinstance(classify_model_error(error), expected)
+
+
+def test_output_validation_errors_are_retryable_for_fresh_model_output():
+    error = OutputValidationError("missing target")
+
+    assert error.retryable is True
+    assert classify_model_error(error) is error
