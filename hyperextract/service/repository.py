@@ -5,8 +5,8 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from .commands import RunCommand
 from .db_models import RunEntity
-from .schemas import RunCommand
 
 
 class IdempotencyConflict(RuntimeError):

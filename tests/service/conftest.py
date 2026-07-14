@@ -107,7 +107,8 @@ def repository():
 
 @pytest.fixture
 def client(settings, repository):
-    from hyperextract.service.app import create_app
+    from hyperextract.service.api.app import create_app
+    from hyperextract.service.runtime import create_runtime
 
     class FakeProfiles:
         def public_descriptor(self, name):
@@ -115,11 +116,10 @@ def client(settings, repository):
                 raise KeyError(name)
             return {"name": name, "fingerprint": "b" * 64}
 
-    with TestClient(
-        create_app(
-            settings=settings,
-            repository=repository,
-            model_profiles=FakeProfiles(),
-        )
-    ) as value:
+    runtime = create_runtime(
+        settings=settings,
+        repository=repository,
+        model_profiles=FakeProfiles(),
+    )
+    with TestClient(create_app(runtime=runtime)) as value:
         yield value

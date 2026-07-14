@@ -9,13 +9,6 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class RunCommand(StrictModel):
-    run_id: str
-    request_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
-    request_json: dict[str, object]
-    output_uri: str
-
-
 class RunInput(StrictModel):
     type: Literal["document_package"]
     contract_version: Literal["1.0"]

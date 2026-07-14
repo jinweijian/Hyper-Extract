@@ -2,8 +2,8 @@ import hashlib
 
 import pytest
 
+from hyperextract.service.commands import RunCommand
 from hyperextract.service.repository import IdempotencyConflict
-from hyperextract.service.schemas import RunCommand
 
 
 def command(run_id="run_1", request_fingerprint=None):

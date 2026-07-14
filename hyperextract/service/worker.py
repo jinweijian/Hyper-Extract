@@ -7,15 +7,13 @@ import uuid
 from hyperextract.documents.course_pipeline import RunCancelled
 
 from .artifacts import ArtifactPublisher
-from .db import create_engine_and_session
-from .repository import RunRepository
 from .settings import ServiceSettings
 
 
 class ServiceWorker:
     def __init__(
         self,
-        repository: RunRepository,
+        repository,
         executor,
         publisher: ArtifactPublisher,
         settings: ServiceSettings,
@@ -50,19 +48,7 @@ class ServiceWorker:
         return True
 
 
-def main() -> None:
-    from .runner import CourseRunExecutor
-
-    settings = ServiceSettings.from_env()
-    engine, factory = create_engine_and_session(settings.database_url)
-    repository = RunRepository(factory)
-    worker = ServiceWorker(
-        repository,
-        CourseRunExecutor(settings, repository),
-        ArtifactPublisher(settings.run_root),
-        settings,
-        worker_id="worker-" + uuid.uuid4().hex[:12],
-    )
+def run_worker_loop(worker: ServiceWorker, settings: ServiceSettings) -> None:
     stopped = False
 
     def stop(_signum, _frame):
@@ -71,9 +57,29 @@ def main() -> None:
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
+    while not stopped:
+        if not worker.run_once():
+            time.sleep(settings.poll_seconds)
+
+
+def main() -> None:
+    from .runner import CourseRunExecutor
+    from .runtime import create_runtime
+
+    runtime = create_runtime()
+    runtime.prepare()
+    worker = ServiceWorker(
+        runtime.repository,
+        CourseRunExecutor(
+            runtime.settings,
+            runtime.repository,
+            runtime.model_profiles,
+        ),
+        ArtifactPublisher(runtime.settings.run_root),
+        runtime.settings,
+        worker_id="worker-" + uuid.uuid4().hex[:12],
+    )
     try:
-        while not stopped:
-            if not worker.run_once():
-                time.sleep(settings.poll_seconds)
+        run_worker_loop(worker, runtime.settings)
     finally:
-        engine.dispose()
+        runtime.close()

@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from hyperextract.service.artifacts import ArtifactPublisher
-from hyperextract.service.schemas import RunCommand
+from hyperextract.service.commands import RunCommand
 from hyperextract.service.worker import ServiceWorker
 
 from .test_artifacts import write_graph

@@ -82,7 +82,7 @@ Issues = "https://github.com/yifanfeng97/hyper-extract/issues"
 [project.scripts]
 he = "hyperextract.cli:app"
 he-mcp = "hyperextract.mcp_server:main"
-he-api = "hyperextract.service.app:main"
+he-api = "hyperextract.service.api.main:main"
 he-worker = "hyperextract.service.worker:main"
 
 [build-system]
