@@ -13,7 +13,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    networks: [hyper_extract_internal]
+    networks: [database]
 
   he-migrate:
     platform: ${PLATFORM:-linux/amd64}
@@ -27,7 +27,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    networks: [hyper_extract_internal]
+    networks: [database]
 
   he-api:
     platform: ${PLATFORM:-linux/amd64}
@@ -38,14 +38,16 @@ services:
     environment:
       HE_SERVICE_DATABASE_URL: postgresql+psycopg://hyperextract:${POSTGRES_PASSWORD}@postgres/hyperextract
       HE_SERVICE_EXCHANGE_ROOT: /exchange
+      HE_SERVICE_MODEL_PROFILES: /run/config/model-profiles.toml
     volumes:
-      - hyper_extract_exchange:/exchange
+      - exchange-data:/exchange
+      - ${MODEL_PROFILES_FILE:-./model-profiles.example.toml}:/run/config/model-profiles.toml:ro
     depends_on:
       postgres:
         condition: service_healthy
       he-migrate:
         condition: service_completed_successfully
-    networks: [hyper_extract_internal]
+    networks: [database, service-api]
 
   he-worker:
     platform: ${PLATFORM:-linux/amd64}
@@ -53,26 +55,32 @@ services:
       context: ..
       dockerfile: docker/service.Dockerfile
     command: ["uv", "run", "--no-sync", "he-worker"]
-    env_file: ../.env
+    env_file:
+      - path: .env
+        required: false
     environment:
       HE_SERVICE_DATABASE_URL: postgresql+psycopg://hyperextract:${POSTGRES_PASSWORD}@postgres/hyperextract
       HE_SERVICE_EXCHANGE_ROOT: /exchange
-      HE_SERVICE_MODEL_PROFILES: /app/config/model-profiles.toml
+      HE_SERVICE_MODEL_PROFILES: /run/config/model-profiles.toml
     volumes:
-      - hyper_extract_exchange:/exchange
-      - ./model-profiles.example.toml:/app/config/model-profiles.toml:ro
+      - exchange-data:/exchange
+      - ${MODEL_PROFILES_FILE:-./model-profiles.example.toml}:/run/config/model-profiles.toml:ro
     depends_on:
       postgres:
         condition: service_healthy
       he-migrate:
         condition: service_completed_successfully
-    networks: [hyper_extract_internal, model_egress]
+    networks: [database, model-egress]
 
 volumes:
-  hyper_extract_exchange:
+  exchange-data:
+    name: ${EXCHANGE_VOLUME_NAME:-hyper-extract-exchange}
   postgres-data:
 
 networks:
-  hyper_extract_internal:
+  database:
     internal: true
-  model_egress: {}
+  service-api:
+    name: ${API_NETWORK_NAME:-hyper-extract-api}
+    internal: true
+  model-egress: {}

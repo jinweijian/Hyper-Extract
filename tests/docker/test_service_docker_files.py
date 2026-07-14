@@ -66,3 +66,77 @@ def test_compose_migration_is_one_shot_and_postgres_unpublished(compose):
     assert "ports" not in services["postgres"]
     # postgres-data volume must be declared at the top level.
     assert "postgres-data" in compose["volumes"]
+
+
+def test_api_has_no_secrets_or_egress_and_worker_does(compose):
+    api = compose["services"]["he-api"]
+    worker = compose["services"]["he-worker"]
+    assert "model-egress" not in api["networks"]
+    assert "env_file" not in api
+    assert "model-egress" in worker["networks"]
+    assert worker["env_file"]
+    assert compose["services"]["postgres"]["networks"] == ["database"]
+    assert "service-api" in api["networks"]
+    assert "service-api" not in worker["networks"]
+
+
+def test_exchange_volume_has_stable_external_name(compose):
+    volume = compose["volumes"]["exchange-data"]
+    assert volume["name"] == "${EXCHANGE_VOLUME_NAME:-hyper-extract-exchange}"
+    assert compose["networks"]["service-api"]["name"] == "${API_NETWORK_NAME:-hyper-extract-api}"
+
+
+def test_three_networks_have_distinct_responsibilities(compose):
+    networks = compose["networks"]
+    # database is internal-only (postgres + migrate + service cores).
+    assert networks["database"]["internal"] is True
+    # service-api is internal and named for external callers to attach to.
+    assert networks["service-api"]["internal"] is True
+    # model-egress has outbound access (no `internal: true`).
+    assert "internal" not in networks["model-egress"] or networks["model-egress"].get("internal") is not True
+
+
+def test_api_and_worker_share_the_same_profile_mount(compose):
+    api = compose["services"]["he-api"]
+    worker = compose["services"]["he-worker"]
+    expected_env = "/run/config/model-profiles.toml"
+    assert api["environment"]["HE_SERVICE_MODEL_PROFILES"] == expected_env
+    assert worker["environment"]["HE_SERVICE_MODEL_PROFILES"] == expected_env
+    expected_mount = "${MODEL_PROFILES_FILE:-./model-profiles.example.toml}:/run/config/model-profiles.toml:ro"
+    assert expected_mount in api["volumes"]
+    assert expected_mount in worker["volumes"]
+
+
+def test_base_compose_publishes_no_api_port(compose):
+    assert "ports" not in compose["services"]["he-api"]
+
+
+def test_dev_override_binds_loopback_only_and_keeps_api_off_egress(dev_compose):
+    api = dev_compose["services"]["he-api"]
+    ports = api["ports"]
+    assert len(ports) == 1
+    assert ports[0].startswith("127.0.0.1:")
+    assert "${HE_API_PORT:-8000}:8000" in ports[0]
+    # The development override must NOT attach the API to the egress network.
+    assert "model-egress" not in api.get("networks", [])
+
+
+def test_env_example_lists_required_operator_variables():
+    text = (ROOT / "docker" / ".env.example").read_text()
+    for key in (
+        "POSTGRES_PASSWORD",
+        "EXCHANGE_VOLUME_NAME",
+        "API_NETWORK_NAME",
+        "HE_API_PORT",
+        "PLATFORM",
+        "HE_IMAGE",
+        "MODEL_PROFILES_FILE",
+    ):
+        assert key in text
+
+
+def test_docker_readme_documents_exchange_and_scaling():
+    text = (ROOT / "docker" / "README.md").read_text()
+    assert "/exchange" in text
+    assert "10001" in text
+    assert "--scale he-worker" in text
