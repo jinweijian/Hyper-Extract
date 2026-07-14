@@ -22,3 +22,47 @@ def test_context_excludes_secrets_and_runtime_data():
     assert ".env" in ignored
     assert ".git/" in ignored
     assert "exchange/" in ignored
+
+
+def test_compose_has_migration_gate_and_database_volume(compose):
+    services = compose["services"]
+    assert services["he-migrate"]["command"] == [
+        "uv",
+        "run",
+        "--no-sync",
+        "alembic",
+        "upgrade",
+        "head",
+    ]
+    assert (
+        services["he-api"]["depends_on"]["he-migrate"]["condition"]
+        == "service_completed_successfully"
+    )
+    assert (
+        services["he-worker"]["depends_on"]["he-migrate"]["condition"]
+        == "service_completed_successfully"
+    )
+    assert "postgres-data:/var/lib/postgresql/data" in services["postgres"]["volumes"]
+    assert (
+        services["postgres"]["environment"]["POSTGRES_PASSWORD"]
+        == "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}"
+    )
+
+
+def test_compose_migration_is_one_shot_and_postgres_unpublished(compose):
+    services = compose["services"]
+    # he-migrate must never restart — it runs once and exits.
+    assert services["he-migrate"]["restart"] == "no"
+    # he-migrate must wait for postgres to be healthy before applying migrations.
+    assert (
+        services["he-migrate"]["depends_on"]["postgres"]["condition"]
+        == "service_healthy"
+    )
+    # API and Worker commands must be ONLY the entrypoint binary — no inline
+    # `alembic upgrade head` chaining, since he-migrate owns migrations.
+    assert services["he-api"]["command"] == ["uv", "run", "--no-sync", "he-api"]
+    assert services["he-worker"]["command"] == ["uv", "run", "--no-sync", "he-worker"]
+    # PostgreSQL must never publish ports to the host.
+    assert "ports" not in services["postgres"]
+    # postgres-data volume must be declared at the top level.
+    assert "postgres-data" in compose["volumes"]

@@ -5,7 +5,9 @@ services:
     environment:
       POSTGRES_DB: hyperextract
       POSTGRES_USER: hyperextract
-      POSTGRES_PASSWORD: hyperextract-local
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U hyperextract"]
       interval: 5s
@@ -13,20 +15,36 @@ services:
       retries: 20
     networks: [hyper_extract_internal]
 
+  he-migrate:
+    platform: ${PLATFORM:-linux/amd64}
+    build:
+      context: ..
+      dockerfile: docker/service.Dockerfile
+    command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
+    restart: "no"
+    environment:
+      HE_SERVICE_DATABASE_URL: postgresql+psycopg://hyperextract:${POSTGRES_PASSWORD}@postgres/hyperextract
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [hyper_extract_internal]
+
   he-api:
     platform: ${PLATFORM:-linux/amd64}
     build:
       context: ..
       dockerfile: docker/service.Dockerfile
-    command: ["sh", "-c", "uv run --no-sync alembic upgrade head && uv run --no-sync he-api"]
+    command: ["uv", "run", "--no-sync", "he-api"]
     environment:
-      HE_SERVICE_DATABASE_URL: postgresql+psycopg://hyperextract:hyperextract-local@postgres/hyperextract
+      HE_SERVICE_DATABASE_URL: postgresql+psycopg://hyperextract:${POSTGRES_PASSWORD}@postgres/hyperextract
       HE_SERVICE_EXCHANGE_ROOT: /exchange
     volumes:
       - hyper_extract_exchange:/exchange
     depends_on:
       postgres:
         condition: service_healthy
+      he-migrate:
+        condition: service_completed_successfully
     networks: [hyper_extract_internal]
 
   he-worker:
@@ -37,7 +55,7 @@ services:
     command: ["uv", "run", "--no-sync", "he-worker"]
     env_file: ../.env
     environment:
-      HE_SERVICE_DATABASE_URL: postgresql+psycopg://hyperextract:hyperextract-local@postgres/hyperextract
+      HE_SERVICE_DATABASE_URL: postgresql+psycopg://hyperextract:${POSTGRES_PASSWORD}@postgres/hyperextract
       HE_SERVICE_EXCHANGE_ROOT: /exchange
       HE_SERVICE_MODEL_PROFILES: /app/config/model-profiles.toml
     volumes:
@@ -46,10 +64,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      he-migrate:
+        condition: service_completed_successfully
     networks: [hyper_extract_internal, model_egress]
 
 volumes:
   hyper_extract_exchange:
+  postgres-data:
 
 networks:
   hyper_extract_internal:

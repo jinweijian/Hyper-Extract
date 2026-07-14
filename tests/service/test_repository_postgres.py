@@ -22,7 +22,9 @@ def _make_repository(database_url: str):
     from hyperextract.service.db import create_engine_and_session
     from hyperextract.service.repository import RunRepository
 
-    engine, session_factory = create_engine_and_session(database_url)
+    engine, session_factory = create_engine_and_session(
+        database_url, for_tests=True
+    )
     return RunRepository(session_factory), engine
 
 
