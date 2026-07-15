@@ -1,6 +1,6 @@
 # Docker 部署
 
-本目录提供 Hyper-Extract 内部服务的 Docker Compose 部署配置，包括 PostgreSQL、一次性数据库迁移、无状态 API 和 Worker。服务所实现的 HTTP 与文件契约见[内部服务指南](../docs/zh/guides/internal-service.md)。
+本目录提供 Hyper-Extract 内部服务的 Docker Compose 部署配置，包括 PostgreSQL、无状态 API 和 Worker。生产环境通过一键部署脚本完成代码更新、镜像构建、数据库迁移和健康检查。服务所实现的 HTTP 与文件契约见[内部服务指南](../docs/zh/guides/internal-service.md)。
 
 ## 目录结构
 
@@ -10,6 +10,8 @@ docker/
 ├── compose.yml
 ├── compose.dev.yml
 ├── .env.example
+├── data/
+│   └── .gitignore
 ├── conf/
 │   └── model-profiles.example.toml
 └── image/
@@ -20,6 +22,7 @@ docker/
 - `compose.yml`：生产基础编排，不向宿主机发布 API 端口。
 - `compose.dev.yml`：本地开发覆盖，仅把 API 绑定到 `127.0.0.1`。
 - `.env.example`：部署变量与密钥变量模板，实际值写入被 Git 忽略的 `.env`。
+- `data/`：PostgreSQL 和 `/exchange` 的宿主机持久化根目录，实际数据不进入 Git。
 - `conf/model-profiles.example.toml`：模型路由、能力、并发和恢复策略示例，不保存密钥值。
 - `image/`：服务镜像与容器入口脚本。
 
@@ -30,13 +33,13 @@ docker/
    调用方 ───────────────────────────────────── he-api
                                                      │
                             database（internal）     │
-   postgres ◄──────────────────── he-api、he-worker、he-migrate
+   postgres ◄──────────────────────────── he-api、he-worker
                                                      │
                             model-egress（外网出口） │
    模型服务端点 ◄──────────────────────────────── he-worker
 ```
 
-- `database`：仅内部访问。PostgreSQL、迁移、API 和 Worker 使用该网络。
+- `database`：仅内部访问。PostgreSQL、API、Worker 和部署时的一次性迁移容器使用该网络。
 - `service-api`：仅内部访问，但通过 `${API_NETWORK_NAME:-hyper-extract-api}` 获得稳定名称。其他 Compose 项目可将该网络声明为 external 并连接 `he-api`，但无法借此访问 PostgreSQL。
 - `model-egress`：允许访问模型服务端点，只有 Worker 连接该网络。
 
@@ -178,17 +181,28 @@ MiniMax 的正确变量名是 `MINIMAX_API_KEY`。旧拼写已经废弃，不应
 
 Profile 的 `recommended_concurrency` 会进一步限制生成与 Embedding 并发，因此提高 `HE_SERVICE_PIPELINE_MAX_WORKERS` 不能绕过模型服务商配额。
 
-## 共享 `/exchange` 数据卷
+## 宿主机持久化数据
 
-API 与 Worker 将同一个命名卷挂载到 `/exchange`。外部调用方不挂载该卷，而是通过 HTTP 上传包和下载结果。
+Compose 使用 bind mount 将数据直接保存到项目的 `docker/data` 目录，方便宿主机备份、容量检查和维护：
 
 ```yaml
-volumes:
-  exchange-data:
-    name: ${EXCHANGE_VOLUME_NAME:-hyper-extract-exchange}
+postgres:
+  volumes:
+    - ${HE_DATA_ROOT:-./data}/postgres:/var/lib/postgresql/data
+
+he-api:
+  volumes:
+    - ${HE_DATA_ROOT:-./data}/exchange:/exchange
 ```
 
-数据卷包含：
+默认映射关系：
+
+- `docker/data/postgres` → PostgreSQL 的 `/var/lib/postgresql/data`；
+- `docker/data/exchange` → API 与 Worker 共享的 `/exchange`。
+
+`PGDATA=/var/lib/postgresql/data/pgdata` 使用挂载目录内的子目录，避免管理文件影响数据库初始化。`docker/data/.gitignore` 会忽略全部运行数据。
+
+`docker/data/exchange` 包含：
 
 - `/exchange/uploads`：上传过程中的临时压缩包，发布后清理。
 - `/exchange/packages`：按内容寻址发布的 Document Package。
@@ -205,23 +219,29 @@ volumes:
 
 ### 所有权与权限
 
-镜像使用固定 UID/GID `10001:10001`。数据卷必须允许该用户写入，不要使用 `chmod 777`。首次部署可设置所有权：
-
-```bash
-docker run --rm -v hyper-extract-exchange:/exchange alpine \
-  chown -R 10001:10001 /exchange
-```
+镜像使用固定 UID/GID `10001:10001`。`scripts/deploy.sh` 会通过新构建镜像的一次性 root 容器自动创建 `/exchange` 子目录并修正所有权，不需要手工执行 `chown`，也不要使用 `chmod 777`。
 
 入口脚本设置 `umask 0002`，新文件通常为 `0664`、目录为 `0775`，以便同一 GID 的协作进程写入。
 
 ## 启动生产环境
 
-在项目根目录执行：
+先准备 `docker/.env`，之后每次发布只需在项目根目录执行：
 
 ```bash
-docker compose --env-file docker/.env \
-  -f docker/compose.yml up -d
+./scripts/deploy.sh
 ```
+
+脚本要求 Git 工作区干净并配置 upstream，然后依次执行：
+
+1. `git pull --ff-only`，代码变化时重新执行更新后的脚本；
+2. 创建 `docker/data/postgres` 与 `docker/data/exchange`；
+3. 校验 Compose 并构建新镜像；
+4. 初始化 exchange 权限并等待 PostgreSQL；
+5. 进入短暂维护窗口：停止 API，再以 90 秒宽限停止 Worker；
+6. 用新 API 镜像执行一次性 `alembic upgrade head`；
+7. 启动 API 与 Worker，并等待 `/health/ready`。
+
+配置校验或构建失败发生在维护窗口之前，旧服务继续运行。迁移失败时脚本保持 API/Worker 停止并输出诊断日志，不执行不可靠的自动 Schema 回滚。
 
 生产基础配置不会发布宿主机端口。调用方应加入 `${API_NETWORK_NAME:-hyper-extract-api}` 网络，并通过服务名 `he-api:8000` 访问 API。
 
@@ -232,10 +252,15 @@ docker compose --env-file docker/.env \
 本地开发额外加载 `compose.dev.yml`：
 
 ```bash
+docker compose --env-file docker/.env -f docker/compose.yml up -d postgres
+docker compose --env-file docker/.env -f docker/compose.yml \
+  run --rm --no-deps he-api alembic upgrade head
 docker compose --env-file docker/.env \
   -f docker/compose.yml \
   -f docker/compose.dev.yml up -d
 ```
+
+直接执行 `docker compose up` 不会隐式迁移数据库；生产部署始终使用 `./scripts/deploy.sh`。
 
 开发覆盖把 API 绑定到：
 
@@ -270,24 +295,23 @@ docker compose --env-file docker/.env -f docker/compose.yml run --rm \
   --file /run/config/model-profiles.toml
 ```
 
-Worker 通过 `HE_PROBE_ROOT=/exchange/probes` 将证据保存到持久卷。探测成功后，把自有 Profile 的 `probe_required` 改为 `true` 并重启服务。
+Worker 通过 `HE_PROBE_ROOT=/exchange/probes` 将证据保存到 `docker/data/exchange/probes`。探测成功后，把自有 Profile 的 `probe_required` 改为 `true` 并重启服务。
 
 ## 启动顺序与数据库迁移
 
-Compose 使用以下启动门禁：
+部署脚本使用以下顺序：
 
 ```text
-postgres 健康 → he-migrate 成功退出 → he-api 与 he-worker 启动
+构建新镜像 → postgres 健康 → 停止 API/Worker → Alembic 成功 → 启动 API/Worker
 ```
 
-`he-migrate` 只运行一次 `alembic upgrade head`，并设置 `restart: "no"`。生产 Schema 只由迁移管理，运行时代码不调用 `create_all()`。
+迁移使用 `docker compose run --rm --no-deps he-api alembic upgrade head` 创建临时容器，完成后自动删除。生产 Schema 只由 Alembic 管理，运行时代码不调用 `create_all()`。
 
 ## 健康检查、停止与重启
 
 | 服务 | 健康检查 | 停止宽限 | 重启策略 |
 | --- | --- | --- | --- |
 | `postgres` | `pg_isready` | 默认 | 默认 |
-| `he-migrate` | 一次性退出状态 | 默认 | `"no"` |
 | `he-api` | `GET /health/ready` | 20 秒 | `unless-stopped` |
 | `he-worker` | 数据库心跳与租约 | 90 秒 | `unless-stopped` |
 
@@ -310,17 +334,17 @@ Worker 崩溃后，租约过期的任务会以 `resume_from_checkpoint=true` 重
 
 ## 备份与破坏性操作
 
-以下命令会永久删除 PostgreSQL 数据和 `/exchange` 状态：
+bind mount 数据不属于 Docker volume，因此以下命令不会删除 `docker/data`：
 
 ```bash
 docker compose down --volumes
 ```
 
-不要对生产项目执行该命令。只有隔离冒烟脚本会在唯一项目名和唯一数据卷下使用它，并通过 `trap` 清理自身资源。
+真正的破坏性操作是删除 `docker/data/postgres` 或 `docker/data/exchange`。删除前必须确认备份和服务停止状态。
 
 备份建议：
 
-- PostgreSQL：对运行中的 `postgres` 服务执行 `pg_dump`，保存任务、尝试、错误和租约状态。
+- PostgreSQL：对运行中的 `postgres` 服务执行 `pg_dump`，保存任务、尝试、错误和租约状态；不要在数据库运行时直接复制原始 PGDATA。
 - `/exchange/runs`：仅在需要跨主机恢复时备份；带 `_SUCCESS` 的产物发布后不可变。
 - `.he-run` 诊断快照：可能包含敏感 Prompt，应配置保留期限；恢复运行不依赖这些快照。
 
@@ -332,7 +356,7 @@ docker compose down --volumes
 sh scripts/service-compose-smoke.sh
 ```
 
-脚本不会调用真实模型。它使用唯一项目名、网络、端口和数据卷，验证：
+脚本不会调用真实模型。它使用唯一项目名、网络、端口和 `mktemp` 创建的临时 `HE_DATA_ROOT`，验证：
 
 1. API 能够就绪；
 2. API 与辅助容器看到同一个 `/exchange` 数据；

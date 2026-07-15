@@ -190,11 +190,17 @@ def test_docker_readme_is_chinese_and_documents_configuration_boundaries():
     text = (ROOT / "docker" / "README.md").read_text()
     for required in (
         "# Docker 部署",
+        "./scripts/deploy.sh",
         "docker/compose.yml",
         "docker/compose.dev.yml",
+        "docker/data/postgres",
+        "docker/data/exchange",
         "MINIMAX_API_KEY",
         "model-profiles.example.toml",
         "只有 Worker",
+        "短暂维护窗口",
+        "bind mount",
+        "pg_dump",
         "/exchange",
         "10001",
         "不要使用 Compose `--scale`",
@@ -203,6 +209,12 @@ def test_docker_readme_is_chinese_and_documents_configuration_boundaries():
     assert "service.compose" not in text
     assert "service.Dockerfile" not in text
     assert "MIMIMAX_API_KEY" not in text
+    for removed in (
+        "EXCHANGE_VOLUME_NAME",
+        "hyper-extract-exchange",
+        "he-migrate",
+    ):
+        assert removed not in text
 
 
 def test_deploy_script_owns_pull_build_migrate_and_readiness():
