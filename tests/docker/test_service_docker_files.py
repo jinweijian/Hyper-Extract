@@ -205,6 +205,40 @@ def test_docker_readme_is_chinese_and_documents_configuration_boundaries():
     assert "MIMIMAX_API_KEY" not in text
 
 
+def test_deploy_script_owns_pull_build_migrate_and_readiness():
+    text = (ROOT / "scripts/deploy.sh").read_text()
+    for required in (
+        "set -Eeuo pipefail",
+        "git pull --ff-only",
+        "docker/data/postgres",
+        "docker/data/exchange",
+        "config --quiet",
+        "build he-api",
+        "up -d postgres",
+        "pg_isready",
+        "stop -t 20 he-api",
+        "stop -t 90 he-worker",
+        "run --rm --no-deps he-api alembic upgrade head",
+        "up -d --remove-orphans he-api he-worker",
+        "/health/ready",
+        "HE_DEPLOY_REEXEC",
+    ):
+        assert required in text
+    assert text.index("build he-api") < text.index("stop -t 20 he-api")
+    assert text.index("stop -t 90 he-worker") < text.index(
+        "alembic upgrade head"
+    )
+    assert "git reset" not in text
+    assert "alembic downgrade" not in text
+
+
+def test_deploy_script_reports_failure_diagnostics():
+    text = (ROOT / "scripts/deploy.sh").read_text()
+    assert "trap 'on_error" in text
+    assert "compose ps" in text
+    assert "logs --tail" in text
+
+
 def test_smoke_script_is_isolated_and_cleans_up():
     text = (ROOT / "scripts" / "service-compose-smoke.sh").read_text()
     assert "set -eu" in text
