@@ -177,13 +177,22 @@ class RunCheckpoint:
         def beat() -> None:
             started = time.monotonic()
             while not stopped.wait(max(1, interval)):
-                self.emit(
-                    stage,
-                    "heartbeat",
-                    message,
-                    chunk_id=chunk_id,
-                    elapsed_seconds=round(time.monotonic() - started),
-                )
+                try:
+                    self.emit(
+                        stage,
+                        "heartbeat",
+                        message,
+                        chunk_id=chunk_id,
+                        elapsed_seconds=round(time.monotonic() - started),
+                    )
+                except Exception:
+                    # A service event sink can reject progress after its
+                    # Worker loses the lease. Stop this auxiliary heartbeat;
+                    # the owning execution path performs the authoritative
+                    # lease/cancellation check and must not be obscured by
+                    # repeated daemon-thread tracebacks.
+                    stopped.set()
+                    return
 
         thread = threading.Thread(target=beat, daemon=True)
         thread.start()

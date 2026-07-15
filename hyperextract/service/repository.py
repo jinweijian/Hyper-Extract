@@ -398,6 +398,11 @@ class RunRepository:
             row.status = "queued"
             row.stage_status = "recovering"
             row.resume_from_checkpoint = True
+            # An explicit operator resume starts a fresh recovery window. The
+            # previous budget only describes automatic lease recovery for the
+            # failed attempt; carrying it forward would make the resumed run
+            # fail immediately on its next transient Worker interruption.
+            row.recovery_count = 0
             row.attempt += 1
             row.error_summary_json = None
             return _record(row)

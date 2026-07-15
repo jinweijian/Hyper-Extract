@@ -132,6 +132,35 @@ docker compose --env-file docker/.env \
   -f docker/service.compose.yml -f docker/service.compose.dev.yml up -d
 ```
 
+### End-to-end local API test
+
+The acceptance script starts the local stack, publishes a Document Package,
+validates it through the API, submits a real model run, follows progress, and
+copies completed artifacts to the product prototype result directory. With the
+default sibling checkout layout it tests the full PMBOK package:
+
+```sh
+./scripts/service-api-course-test.sh
+```
+
+Use another package or reconnect to a long-running task without resubmitting:
+
+```sh
+./scripts/service-api-course-test.sh --package /absolute/path/to/document.hepkg
+./scripts/service-api-course-test.sh --run-id run_xxx
+```
+
+Stopping the script with `Ctrl+C` only stops local monitoring; the Worker run
+continues and can be reattached with `--run-id`.
+
+Recoverable failures are resumed from the existing checkpoint up to three
+times by default. Use `--max-resumes N` to change that bounded operator-side
+policy; non-resumable failures and cancellations are never retried.
+
+The script reuses a healthy local stack by default so an in-flight Worker is
+never recreated. Pass `--build` only when no extraction run is active and the
+service image intentionally needs to be rebuilt.
+
 The startup order is gated:
 
 ```

@@ -44,6 +44,28 @@ def test_cancel_and_resume_state_machine(repository):
     assert resumed.attempt == 2
 
 
+def test_manual_resume_resets_automatic_worker_recovery_budget(repository):
+    from hyperextract.service.db_models import RunEntity
+
+    failed, _ = repository.create_or_get(command("run_recovery_resume"), "task-r")
+    with repository.session_factory.begin() as session:
+        row = session.get(RunEntity, failed.run_id)
+        row.recovery_count = 3
+    repository.fail(
+        failed.run_id,
+        code="WORKER_RECOVERY_EXHAUSTED",
+        message="Worker recovery limit was reached",
+        resumable=True,
+        source="recovery",
+    )
+
+    resumed = repository.resume(failed.run_id)
+
+    assert resumed.status == "queued"
+    assert resumed.attempt == 2
+    assert resumed.recovery_count == 0
+
+
 def test_failure_is_recorded_and_queryable(repository, running_run):
     repository.fail(
         running_run.run_id,

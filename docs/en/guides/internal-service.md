@@ -66,6 +66,9 @@ Use `POST /v1/runs/{run_id}/cancel` and
 `POST /v1/runs/{run_id}/resume`. Cancellation happens at checkpoint-safe
 boundaries and the Worker finalizes a running cancellation to `cancelled`.
 Resume uses the same logical run and existing `.he-run` files.
+An accepted operator resume increments `attempt` and resets the automatic
+Worker lease-recovery counter, giving the new attempt a fresh bounded recovery
+window instead of immediately inheriting an exhausted one.
 
 `GET /v1/runs/{run_id}/errors` returns the stable, redacted failure history
 (attempt, code, source, message, occurred_at). It never exposes exception repr,

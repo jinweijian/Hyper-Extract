@@ -1,3 +1,5 @@
+import threading
+
 from hyperextract.documents.checkpoint import RunCheckpoint, atomic_write_json
 
 
@@ -42,3 +44,21 @@ def test_checkpoint_force_starts_clean_run(tmp_path):
 
     assert restarted.run_id != first.run_id
     assert not (restarted.chunk_dir("chunk-1") / "graph.json").exists()
+
+
+def test_checkpoint_heartbeat_stops_when_event_sink_rejects_progress(tmp_path):
+    sink_called = threading.Event()
+
+    def rejected_sink(_event):
+        sink_called.set()
+        raise RuntimeError("lease ownership lost")
+
+    checkpoint = RunCheckpoint(
+        tmp_path,
+        source_fingerprint="abc",
+        config={"chunk": 4},
+        event_sink=rejected_sink,
+    )
+
+    with checkpoint.heartbeat("extract", "working", interval=1):
+        assert sink_called.wait(timeout=2)

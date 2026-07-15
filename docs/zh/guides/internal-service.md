@@ -1089,6 +1089,7 @@ queued -> ingest -> chunk_plan -> local_extract -> deduplicate
 - `status` 变为 `queued`；
 - `stage_status` 变为 `recovering`；
 - `attempt` 加一；
+- 自动 Worker 租约恢复计数重置为 `0`，新 attempt 获得一组新的有界恢复预算；
 - `error_summary` 清空；
 - 使用同一个 `run_id` 和已有 checkpoint，已完成块不会重复处理。
 
