@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from hyperextract.providers.profiles import ModelProfile, load_profile
+from hyperextract.providers.profiles import (
+    ModelProfile,
+    ProfileEmbeddingCapabilities,
+    ProfileRecovery,
+    load_profile,
+)
+from hyperextract.providers.contracts import ProfileConfigurationError
 from hyperextract.providers.registry import ProviderRegistry
 
 
@@ -113,3 +119,98 @@ llm_api_key_env = "OPENAI_API_KEY"
     registry = ProviderRegistry(toml_path=toml_path)
     profile = registry.get("openai-compatible-default")
     assert profile.llm == "openai:gpt-4o-mini@https://custom.example.com/v1"
+
+
+def test_embedding_failure_policy_is_independent_from_structured_list_policy(
+    monkeypatch,
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-llm")
+    monkeypatch.setenv("EMBEDDING_API_KEY", "sk-embedding")
+    profile = ModelProfile(
+        name="independent-policies",
+        llm="openai:gpt-4o@https://api.openai.com/v1",
+        llm_api_key_env="OPENAI_API_KEY",
+        embedder="openai:text-embedding-3-small@https://api.openai.com/v1",
+        embedder_api_key_env="EMBEDDING_API_KEY",
+        embedding_capabilities=ProfileEmbeddingCapabilities(
+            item_failure_policy="quarantine"
+        ),
+        recovery=ProfileRecovery(invalid_list_item_policy="fail"),
+    )
+    registry = ProviderRegistry()
+    registry.register(profile)
+
+    adapter = registry.create_embedding_adapter(
+        profile.name,
+        client=object(),
+        encoding=object(),
+    )
+
+    assert adapter._item_failure_policy == "quarantine"
+
+
+def test_course_service_validation_requires_embedder():
+    registry = ProviderRegistry()
+    registry.register(_make_profile("llm-only"))
+
+    with pytest.raises(ProfileConfigurationError) as error:
+        registry.validate(
+            "llm-only",
+            require_secrets=False,
+            require_embedder=True,
+        )
+
+    assert error.value.code == "EMBEDDER_MISSING"
+
+
+def test_validation_rejects_malformed_model_reference_before_adapter_creation():
+    registry = ProviderRegistry()
+    registry.register(
+        ModelProfile(
+            name="malformed",
+            llm="missing-provider-separator",
+            llm_api_key_env="OPENAI_API_KEY",
+        )
+    )
+
+    with pytest.raises(ProfileConfigurationError) as error:
+        registry.validate("malformed", require_secrets=False)
+
+    assert error.value.code == "MODEL_REFERENCE_INVALID"
+
+
+def test_validation_rejects_empty_explicit_base_url():
+    registry = ProviderRegistry()
+    registry.register(
+        ModelProfile(
+            name="empty-base",
+            llm="openai:model@",
+            llm_api_key_env="OPENAI_API_KEY",
+        )
+    )
+
+    with pytest.raises(ProfileConfigurationError) as error:
+        registry.validate("empty-base", require_secrets=False)
+
+    assert error.value.code == "MODEL_REFERENCE_INVALID"
+
+
+def test_validation_can_enforce_required_probe(monkeypatch):
+    registry = ProviderRegistry()
+    profile = _make_profile("probe-required").model_copy(
+        update={"probe_required": True}
+    )
+    registry.register(profile)
+    calls = []
+    monkeypatch.setattr(
+        "hyperextract.providers.probe.ensure_probe_eligibility",
+        lambda selected: calls.append(selected.name),
+    )
+
+    registry.validate(
+        profile.name,
+        require_secrets=False,
+        check_probe=True,
+    )
+
+    assert calls == [profile.name]

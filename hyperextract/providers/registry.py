@@ -70,10 +70,21 @@ class ProviderRegistry:
     def list(self) -> list[str]:
         return sorted({*self._profiles, DEFAULT_PROFILE_NAME})
 
+    def readiness_profiles(self) -> list[str]:
+        """Profiles that make the deployment usable without requiring secrets."""
+        return sorted(self._profiles) or [DEFAULT_PROFILE_NAME]
+
     def public_descriptor(self, name: str) -> dict:
         return self.get(name).public_descriptor()
 
-    def validate(self, name: str, *, require_secrets: bool = True) -> list[str]:
+    def validate(
+        self,
+        name: str,
+        *,
+        require_secrets: bool = True,
+        require_embedder: bool = False,
+        check_probe: bool = False,
+    ) -> list[str]:
         profile = self.get(name)
         warnings_found: list[str] = []
         if not profile.llm:
@@ -81,6 +92,28 @@ class ProviderRegistry:
                 f"Profile {name!r} does not select an LLM model",
                 code="LLM_MODEL_MISSING",
             )
+        parse_model_reference(profile.llm)
+        if not profile.llm_api_key_env.strip():
+            raise ProfileConfigurationError(
+                f"Profile {name!r} has an empty LLM credential environment name",
+                code="MODEL_PROFILE_ENV_NAME_MISSING",
+            )
+        if require_embedder and (
+            not profile.embedder or profile.embedding_capabilities is None
+        ):
+            raise ProfileConfigurationError(
+                f"Profile {name!r} does not configure an embedder",
+                code="EMBEDDER_MISSING",
+            )
+        if profile.embedder:
+            parse_model_reference(profile.embedder)
+            if not profile.embedder_api_key_env.strip():
+                raise ProfileConfigurationError(
+                    f"Profile {name!r} has an empty embedding credential "
+                    "environment name",
+                    code="MODEL_PROFILE_ENV_NAME_MISSING",
+                )
+        _validate_parameter_mapping(profile)
         if require_secrets:
             self._required_env(profile.llm_api_key_env)
             if profile.embedder:
@@ -90,12 +123,16 @@ class ProviderRegistry:
         if profile.embedding_capabilities is not None:
             if profile.embedding_capabilities.empty_input_policy == "zero_vector":
                 warnings_found.append("embedding_zero_vector_enabled")
+        if check_probe:
+            from hyperextract.providers.probe import ensure_probe_eligibility
+
+            ensure_probe_eligibility(profile)
         return warnings_found
 
-    def create_generation_adapter(self, name: str, *, client=None):
+    def create_generation_adapter(self, name: str, *, client=None, api_key=None):
         profile = self.get(name)
         reference = parse_model_reference(profile.llm)
-        api_key = self._required_env(profile.llm_api_key_env)
+        api_key = api_key or self._required_env(profile.llm_api_key_env)
         common = {
             "model": reference.model,
             "base_url": reference.base_url,
@@ -108,7 +145,15 @@ class ProviderRegistry:
             return AnthropicAdapter(**common)
         return OpenAIChatAdapter(**common)
 
-    def create_embedding_adapter(self, name: str, *, client=None, encoding=None):
+    def create_embedding_adapter(
+        self,
+        name: str,
+        *,
+        client=None,
+        encoding=None,
+        scheduler=None,
+        api_key=None,
+    ):
         profile = self.get(name)
         if not profile.embedder or profile.embedding_capabilities is None:
             raise ProfileConfigurationError(
@@ -119,11 +164,13 @@ class ProviderRegistry:
         return OpenAIEmbeddingAdapter(
             model=reference.model,
             base_url=reference.base_url,
-            api_key=self._required_env(profile.embedder_api_key_env),
+            api_key=api_key or self._required_env(profile.embedder_api_key_env),
             capabilities=profile.embedding_capabilities.to_contract(),
             client=client,
             encoding=encoding,
             max_retries=0,
+            item_failure_policy=profile.embedding_capabilities.item_failure_policy,
+            scheduler=scheduler,
         )
 
     @staticmethod
@@ -226,6 +273,7 @@ class ProviderRegistry:
 
 
 def parse_model_reference(value: str) -> ModelReference:
+    value = value.strip()
     if not value:
         raise ProfileConfigurationError(
             "Model reference is empty", code="MODEL_REFERENCE_EMPTY"
@@ -236,15 +284,53 @@ def parse_model_reference(value: str) -> ModelReference:
             f"Model reference must use provider:model@base_url syntax: {value!r}",
             code="MODEL_REFERENCE_INVALID",
         )
+    provider = provider.strip()
     model, at, base_url = remainder.partition("@")
+    model = model.strip()
+    base_url = base_url.strip()
     if not provider or not model:
         raise ProfileConfigurationError(
             f"Invalid model reference: {value!r}",
             code="MODEL_REFERENCE_INVALID",
         )
+    if at and not base_url:
+        raise ProfileConfigurationError(
+            f"Model reference has an empty base URL: {value!r}",
+            code="MODEL_REFERENCE_INVALID",
+        )
     return ModelReference(
         provider=provider, model=model, base_url=base_url if at else None
     )
+
+
+def _validate_parameter_mapping(profile: ModelProfile) -> None:
+    known = {"max_output_tokens", "temperature", "timeout_seconds"}
+    capabilities = profile.capabilities
+    declared = capabilities.supported_parameters | capabilities.omit_if_unsupported
+    unknown = declared - known
+    if unknown:
+        raise ProfileConfigurationError(
+            f"Profile {profile.name!r} declares unknown parameters: {sorted(unknown)}",
+            code="PARAMETER_MAPPING_INVALID",
+        )
+    required = {"timeout_seconds"}
+    if profile.max_tokens is not None or capabilities.max_output_tokens is not None:
+        required.add("max_output_tokens")
+    missing = required - declared
+    if missing:
+        raise ProfileConfigurationError(
+            f"Profile {profile.name!r} has no mapping policy for parameters: "
+            f"{sorted(missing)}",
+            code="PARAMETER_MAPPING_INCOMPLETE",
+        )
+    if (
+        "max_output_tokens" in capabilities.supported_parameters
+        and not capabilities.output_token_parameter.strip()
+    ):
+        raise ProfileConfigurationError(
+            f"Profile {profile.name!r} has an empty output token parameter mapping",
+            code="PARAMETER_MAPPING_INCOMPLETE",
+        )
 
 
 def _env_group(prefix: str) -> dict[str, str]:

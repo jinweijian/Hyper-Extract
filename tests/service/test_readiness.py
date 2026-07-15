@@ -9,6 +9,7 @@ from pathlib import Path
 
 from sqlalchemy.exc import OperationalError
 from unittest.mock import Mock
+from types import SimpleNamespace
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
@@ -70,3 +71,23 @@ def test_ready_passes_when_all_checks_healthy(client, repository):
     body = response.json()
     assert body["status"] == "ready"
     assert all(body["checks"].values())
+
+
+def test_model_readiness_enforces_required_probe():
+    from hyperextract.providers.contracts import ProfileConfigurationError
+    from hyperextract.service.api.routes.health import _check_model_profiles
+
+    class ProbeRequiredProfiles:
+        def readiness_profiles(self):
+            return ["production"]
+
+        def validate(self, name, *, check_probe=False, **_kwargs):
+            assert check_probe is True
+            raise ProfileConfigurationError("probe required", code="PROBE_REQUIRED")
+
+        def public_descriptor(self, name):
+            return {"name": name}
+
+    runtime = SimpleNamespace(model_profiles=ProbeRequiredProfiles())
+
+    assert _check_model_profiles(runtime) is False

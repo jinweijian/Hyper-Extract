@@ -57,12 +57,14 @@ def probe(
 ) -> None:
     registry = _registry(file)
     selected = registry.get(profile)
+    store = ProbeStore()
+    store.invalidate(selected.public_fingerprint())
     generation = registry.create_generation_adapter(profile)
     embedding = (
         registry.create_embedding_adapter(profile) if selected.embedder else None
     )
     result = CapabilityProbe(generation, embedding).run(selected)
-    path = ProbeStore().save(result)
+    path = store.save(result)
     console.print(JSON.from_data(describe_probe(result)))
     console.print(f"[green]saved[/green] {path}")
     if not all(result.checks.values()):

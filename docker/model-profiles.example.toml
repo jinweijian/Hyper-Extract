@@ -6,7 +6,7 @@ embedder = "openai:Qwen/Qwen3-Embedding-8B@https://api.siliconflow.cn/v1"
 embedder_api_key_env = "EMBEDDING_API_KEY"
 llm_rate_limit_group = "minimax-production-account"
 embedder_rate_limit_group = "siliconflow-embedding-account"
-probe_required = true
+probe_required = false
 request_timeout = 900
 
 [profiles.minimax-m27.capabilities]
@@ -27,6 +27,8 @@ max_batch_items = 10
 max_input_tokens_per_item = 8191
 supports_dimensions = false
 empty_input_policy = "quarantine"
+item_failure_policy = "quarantine"
+recommended_concurrency = 2
 
 [profiles.minimax-m27.recovery]
 validation_repair_attempts = 1

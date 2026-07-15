@@ -67,6 +67,16 @@ class ArtifactPublisher:
             "HyperExtractCourseGraphComparison",
         ),
     }
+    AUDIT_DIRECTORIES = {
+        "raw-responses": ("model_raw_response", "HyperExtractRawModelResponse"),
+        "validation": ("model_validation", "HyperExtractValidationSummary"),
+        "rejections": ("model_rejection", "HyperExtractRejectedItems"),
+        "embedding-rejections": (
+            "embedding_rejection",
+            "HyperExtractEmbeddingRejections",
+        ),
+        "diagnostics": ("model_diagnostic", "HyperExtractModelDiagnostic"),
+    }
 
     def __init__(self, run_root: Path):
         self.run_root = run_root.resolve()
@@ -106,6 +116,34 @@ class ArtifactPublisher:
                         required=filename in self.REQUIRED,
                     )
                 )
+            checkpoint = work / ".he-run"
+            for directory, (name_prefix, schema_name) in self.AUDIT_DIRECTORIES.items():
+                source_root = checkpoint / directory
+                if not source_root.is_dir():
+                    continue
+                for source in sorted(
+                    path for path in source_root.rglob("*") if path.is_file()
+                ):
+                    relative = source.relative_to(checkpoint)
+                    published = Path("model-audit") / relative
+                    target = staging / published
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, target)
+                    entries.append(
+                        ArtifactEntry(
+                            name=f"{name_prefix}:{relative.as_posix()}",
+                            path=published.as_posix(),
+                            media_type=(
+                                "application/x-ndjson"
+                                if source.suffix == ".jsonl"
+                                else "application/json"
+                            ),
+                            schema_name=schema_name,
+                            size=target.stat().st_size,
+                            sha256=_sha256(target),
+                            required=False,
+                        )
+                    )
             manifest = ArtifactManifest(run_id=record.run_id, artifacts=entries)
             manifest_path = staging / "artifact-manifest.json"
             _write_sync(manifest_path, manifest.model_dump_json(indent=2))

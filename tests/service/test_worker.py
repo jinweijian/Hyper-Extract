@@ -3,10 +3,12 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from hyperextract.documents.course_pipeline import RunCancelled
 from hyperextract.service.artifacts import ArtifactPublisher
 from hyperextract.service.commands import RunCommand
-from hyperextract.service.worker import ServiceWorker
+from hyperextract.service.worker import ServiceWorker, WorkerSingletonLock
 
 from .test_artifacts import write_graph
 
@@ -16,6 +18,13 @@ class FakeExecutor:
         work = Path(record.output_uri.removeprefix("file://")) / "work"
         write_graph(work, record.run_id)
         return {"status": "completed"}
+
+
+def test_worker_singleton_lock_rejects_second_process_on_shared_exchange(tmp_path):
+    with WorkerSingletonLock(tmp_path):
+        with pytest.raises(RuntimeError, match="HE_SERVICE_SINGLE_WORKER_REQUIRED"):
+            with WorkerSingletonLock(tmp_path):
+                pass
 
 
 def _make_command(run_id, output_uri):

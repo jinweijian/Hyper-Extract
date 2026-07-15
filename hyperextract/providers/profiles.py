@@ -5,23 +5,27 @@ import warnings
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from hyperextract.documents.checkpoint import fingerprint
 from hyperextract.providers.contracts import (
     EmbeddingCapabilities,
     ModelCapabilities,
-    OutputMode,
+    ProviderOutputMode,
 )
 
 
 class ProfileCapabilities(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     transport: Literal["openai_chat", "anthropic_messages"] = "openai_chat"
-    structured_output_modes: list[OutputMode] = Field(
+    structured_output_modes: list[ProviderOutputMode] = Field(
         default_factory=lambda: ["text_json"]
     )
-    preferred_structured_output_mode: OutputMode = "text_json"
-    structured_output_fallback_order: list[OutputMode] = Field(default_factory=list)
+    preferred_structured_output_mode: ProviderOutputMode = "text_json"
+    structured_output_fallback_order: list[ProviderOutputMode] = Field(
+        default_factory=list
+    )
     reasoning_content_mode: Literal[
         "none", "inline_tags", "separate_field", "content_blocks"
     ] = "none"
@@ -44,12 +48,14 @@ class ProfileCapabilities(BaseModel):
                 f"{self.preferred_structured_output_mode!r} is not in "
                 f"structured_output_modes {self.structured_output_modes}"
             )
+        if self.transport == "anthropic_messages" and "native" in (
+            self.structured_output_modes
+        ):
+            raise ValueError(
+                "anthropic_messages does not implement native structured output; "
+                "use tool, json_object, or text_json"
+            )
         for mode in self.structured_output_fallback_order:
-            if mode == "auto":
-                raise ValueError(
-                    "structured_output_fallback_order must not contain 'auto'; "
-                    f"found: {self.structured_output_fallback_order}"
-                )
             if mode not in self.structured_output_modes:
                 raise ValueError(
                     f"structured_output_fallback_order mode {mode!r} is not in "
@@ -89,6 +95,8 @@ class ProfileCapabilities(BaseModel):
 
 
 class ProfileEmbeddingCapabilities(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     transport: Literal["openai_embeddings"] = "openai_embeddings"
     accepts_token_ids: bool = False
     max_batch_items: int | None = None
@@ -96,6 +104,10 @@ class ProfileEmbeddingCapabilities(BaseModel):
     max_input_tokens_per_item: int | None = None
     supports_dimensions: bool = False
     empty_input_policy: Literal["reject", "quarantine", "zero_vector"] = "reject"
+    item_failure_policy: Literal["quarantine", "fail"] = "quarantine"
+    recommended_concurrency: int = 1
+    requests_per_minute: int | None = None
+    tokens_per_minute: int | None = None
 
     @model_validator(mode="after")
     def _validate_limits(self) -> ProfileEmbeddingCapabilities:
@@ -103,10 +115,14 @@ class ProfileEmbeddingCapabilities(BaseModel):
             "max_batch_items",
             "max_batch_tokens",
             "max_input_tokens_per_item",
+            "requests_per_minute",
+            "tokens_per_minute",
         ):
             value = getattr(self, name)
             if value is not None and value < 1:
                 raise ValueError(f"{name} must be positive")
+        if self.recommended_concurrency < 1:
+            raise ValueError("recommended_concurrency must be at least 1")
         return self
 
     def to_contract(self) -> EmbeddingCapabilities:
@@ -114,6 +130,8 @@ class ProfileEmbeddingCapabilities(BaseModel):
 
 
 class ProfileRecovery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     validation_repair_attempts: int = 1
     validation_retry_attempts: int = 3
     transient_retry_attempts: int = 4
@@ -146,6 +164,8 @@ class ProfileRecovery(BaseModel):
 
 
 class ModelProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     transport: Literal["openai_chat", "anthropic_messages"] = "openai_chat"
     llm: str
@@ -163,7 +183,7 @@ class ModelProfile(BaseModel):
     max_tokens: int | None = None
 
     @property
-    def structured_output_mode(self) -> OutputMode:
+    def structured_output_mode(self) -> ProviderOutputMode:
         return self.capabilities.preferred_structured_output_mode
 
     @property
@@ -214,11 +234,14 @@ class ModelProfile(BaseModel):
         }
 
     def public_fingerprint(self) -> str:
-        return fingerprint(self._public_dict())
+        execution = self._public_dict()
+        execution.pop("probe_required", None)
+        execution.pop("probe_ttl_hours", None)
+        return fingerprint(execution)
 
     def public_descriptor(self) -> dict[str, Any]:
         descriptor = self._public_dict()
-        descriptor["fingerprint"] = fingerprint(descriptor)
+        descriptor["fingerprint"] = self.public_fingerprint()
         return descriptor
 
 

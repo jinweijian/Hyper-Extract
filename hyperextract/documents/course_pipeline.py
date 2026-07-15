@@ -10,6 +10,7 @@ import re
 import signal
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -31,6 +32,7 @@ from hyperextract.methods.rag.course_knowledge_graph import (
 )
 from hyperextract.profiles.course import CourseExtractionProfile, load_course_profile
 from hyperextract.providers.contracts import CanonicalModelFailure
+from hyperextract.providers.gateway import GatewayExecutionError
 from hyperextract.providers.profiles import ProfileRecovery
 from hyperextract.providers.recovery import RecoveryPolicy, RecoveryState
 
@@ -70,6 +72,7 @@ class PipelineOptions:
     max_tokens: int = 6000
     max_workers: int = 2
     retry_attempts: int = 4
+    recovery: ProfileRecovery | None = None
     heartbeat_interval: int = 30
     semantic_dedup: bool = True
     community_reports: bool = False
@@ -92,6 +95,17 @@ class PipelineControl:
 
 class RunCancelled(RuntimeError):
     """Raised at a checkpoint-safe boundary after cancellation is requested."""
+
+
+def _with_model_request_metadata(
+    ka: CourseKnowledgeGraph,
+    operation: Callable[[], T],
+    **metadata: str | None,
+) -> T:
+    context = getattr(ka, "model_request_context", None)
+    manager = context(**metadata) if callable(context) else nullcontext()
+    with manager:
+        return operation()
 
 
 def _check_cancel(control: PipelineControl | None) -> None:
@@ -180,17 +194,20 @@ def _retry(
     stage: str,
     message: str,
     attempts: int,
+    recovery: ProfileRecovery | None = None,
     heartbeat_interval: int,
     chunk_id: str | None = None,
 ) -> T:
     state = RecoveryState()
     policy = RecoveryPolicy(
-        ProfileRecovery(
+        recovery
+        or ProfileRecovery(
             transient_retry_attempts=max(0, attempts - 1),
             validation_repair_attempts=0,
             validation_retry_attempts=0,
         )
     )
+    recovery_started = time.monotonic()
     attempt = 1
     while True:
         try:
@@ -203,10 +220,13 @@ def _retry(
                 return operation()
         except Exception as error:
             classified = classify_model_error(error)
+            if _contains_gateway_execution_error(classified):
+                raise classified from error
             failure = _canonical_pipeline_failure(
                 classified,
                 request_id=f"{stage}:{chunk_id or 'run'}:{attempt}",
             )
+            state.rate_limit_elapsed_seconds = time.monotonic() - recovery_started
             decision = policy.decide(failure, state)
             if decision.action != "retry":
                 raise classified from error
@@ -227,6 +247,19 @@ def _retry(
                 recovery_reason=decision.reason,
             )
             time.sleep(decision.delay_seconds)
+
+
+def _contains_gateway_execution_error(error: BaseException) -> bool:
+    """Return whether provider recovery was already exhausted by the gateway."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        if isinstance(current, GatewayExecutionError):
+            return True
+        seen.add(id(current))
+        original = getattr(current, "original", None)
+        current = original if isinstance(original, BaseException) else current.__cause__
+    return False
 
 
 def _canonical_pipeline_failure(
@@ -383,11 +416,17 @@ def _extract_local_edge_batch(
         return [CourseEdge.model_validate(value) for value in cached.get("items", [])]
     try:
         edges = _retry(
-            lambda: ka.extract_edges(context, nodes),
+            lambda: _with_model_request_metadata(
+                ka,
+                lambda: ka.extract_edges(context, nodes),
+                chunk_id=chunk_id,
+                batch_id=batch_path.stem,
+            ),
             checkpoint=checkpoint,
             stage="local_extract",
             message=label,
             attempts=options.retry_attempts,
+            recovery=options.recovery,
             heartbeat_interval=options.heartbeat_interval,
             chunk_id=chunk_id,
         )
@@ -455,11 +494,17 @@ def _extract_chunk(
                 )
             else:
                 combined = _retry(
-                    lambda: ka.extract_chunk_result(context),
+                    lambda: _with_model_request_metadata(
+                        ka,
+                        lambda: ka.extract_chunk_result(context),
+                        chunk_id=chunk.id,
+                        batch_id="chunk-result",
+                    ),
                     checkpoint=checkpoint,
                     stage="local_extract",
                     message=f"节点与局部关系联合抽取 {chunk.id}",
                     attempts=options.retry_attempts,
+                    recovery=options.recovery,
                     heartbeat_interval=options.heartbeat_interval,
                     chunk_id=chunk.id,
                 )
@@ -489,11 +534,17 @@ def _extract_chunk(
             )
         else:
             nodes = _retry(
-                lambda: ka.extract_nodes(context),
+                lambda: _with_model_request_metadata(
+                    ka,
+                    lambda: ka.extract_nodes(context),
+                    chunk_id=chunk.id,
+                    batch_id="nodes",
+                ),
                 checkpoint=checkpoint,
                 stage="local_extract",
                 message=f"节点抽取 {chunk.id}",
                 attempts=options.retry_attempts,
+                recovery=options.recovery,
                 heartbeat_interval=options.heartbeat_interval,
                 chunk_id=chunk.id,
             )
@@ -614,12 +665,41 @@ def _cosine(left: list[float], right: list[float]) -> float:
     return numerator / (left_norm * right_norm) if left_norm and right_norm else 0.0
 
 
+def _embedding_cosine(
+    embeddings: list[list[float] | None], left: int, right: int
+) -> float:
+    if (
+        not embeddings
+        or left >= len(embeddings)
+        or right >= len(embeddings)
+        or embeddings[left] is None
+        or embeddings[right] is None
+    ):
+        return 0.0
+    return _cosine(embeddings[left], embeddings[right])
+
+
+def _embed_documents_with_quarantine(
+    embedder: Any, texts: list[str]
+) -> list[list[float] | None]:
+    embed_with_status = getattr(embedder, "embed_with_status", None)
+    if callable(embed_with_status):
+        response = embed_with_status(texts)
+        return [item.vector for item in response.items]
+    return embedder.embed_documents(texts)
+
+
 def _deduplicate(
     ka: CourseKnowledgeGraph,
     graphs: list[dict[str, Any]],
     checkpoint: RunCheckpoint,
     options: PipelineOptions,
-) -> tuple[list[CourseNode], list[CourseEdge], list[dict[str, Any]], list[list[float]]]:
+) -> tuple[
+    list[CourseNode],
+    list[CourseEdge],
+    list[dict[str, Any]],
+    list[list[float] | None],
+]:
     grouped: dict[str, CourseNode] = {}
     aliases: dict[str, str] = {}
     log: list[dict[str, Any]] = []
@@ -640,16 +720,17 @@ def _deduplicate(
         )
 
     nodes = list(grouped.values())
-    embeddings: list[list[float]] = []
+    embeddings: list[list[float] | None] = []
     if nodes:
         embeddings = _retry(
-            lambda: ka.embedder.embed_documents(
-                [f"{node.name}\n{node.summary}" for node in nodes]
+            lambda: _embed_documents_with_quarantine(
+                ka.embedder, [f"{node.name}\n{node.summary}" for node in nodes]
             ),
             checkpoint=checkpoint,
             stage="deduplicate",
             message="生成知识点去重向量",
             attempts=options.retry_attempts,
+            recovery=options.recovery,
             heartbeat_interval=options.heartbeat_interval,
         )
 
@@ -660,7 +741,7 @@ def _deduplicate(
                 lexical = SequenceMatcher(
                     None, normalize_name(nodes[i].name), normalize_name(nodes[j].name)
                 ).ratio()
-                similarity = _cosine(embeddings[i], embeddings[j]) if embeddings else 0
+                similarity = _embedding_cosine(embeddings, i, j)
                 if similarity >= 0.94 or lexical >= 0.82:
                     candidates.append((max(similarity, lexical), i, j))
         parent = list(range(len(nodes)))
@@ -686,16 +767,21 @@ def _deduplicate(
                 decision = DedupDecision.model_validate(cached_decision)
             else:
                 decision = _retry(
-                    lambda left=left, right=right: ka.dedup_extractor.invoke(
-                        {
-                            "left": f"{left.name}: {left.summary}",
-                            "right": f"{right.name}: {right.summary}",
-                        }
+                    lambda left=left, right=right: _with_model_request_metadata(
+                        ka,
+                        lambda: ka.dedup_extractor.invoke(
+                            {
+                                "left": f"{left.name}: {left.summary}",
+                                "right": f"{right.name}: {right.summary}",
+                            }
+                        ),
+                        batch_id=decision_path.stem,
                     ),
                     checkpoint=checkpoint,
                     stage="deduplicate",
                     message=f"判断同义知识点：{left.name} / {right.name}",
                     attempts=options.retry_attempts,
+                    recovery=options.recovery,
                     heartbeat_interval=options.heartbeat_interval,
                 )
                 if decision is not None:
@@ -717,13 +803,14 @@ def _deduplicate(
         nodes = [node for index, node in enumerate(nodes) if find(index) == index]
         if nodes:
             embeddings = _retry(
-                lambda: ka.embedder.embed_documents(
-                    [f"{node.name}\n{node.summary}" for node in nodes]
+                lambda: _embed_documents_with_quarantine(
+                    ka.embedder, [f"{node.name}\n{node.summary}" for node in nodes]
                 ),
                 checkpoint=checkpoint,
                 stage="deduplicate",
                 message="刷新合并后的知识点向量",
                 attempts=options.retry_attempts,
+                recovery=options.recovery,
                 heartbeat_interval=options.heartbeat_interval,
             )
 
@@ -754,7 +841,7 @@ def _deduplicate(
 def _global_edge_candidates(
     outline: DocumentOutline,
     nodes: list[CourseNode],
-    embeddings: list[list[float]],
+    embeddings: list[list[float] | None],
     *,
     existing_edges: list[CourseEdge] | None = None,
     top_k: int = 1,
@@ -810,7 +897,7 @@ def _global_edge_candidates(
                 continue
             if top_level(node.parent_outline_id) != top_level(other.parent_outline_id):
                 continue
-            score = _cosine(embeddings[i], embeddings[j]) if embeddings else 0.0
+            score = _embedding_cosine(embeddings, i, j)
             reasons: set[str] = set()
             if score >= similarity_threshold:
                 reasons.add("semantic_similarity")
@@ -853,7 +940,7 @@ def _global_edge_candidates(
         if contrast:
             _, i, j = contrast
             key = tuple(sorted((i, j)))
-            score = _cosine(embeddings[i], embeddings[j]) if embeddings else 0.0
+            score = _embedding_cosine(embeddings, i, j)
             previous_score, previous_reasons = pairs.get(key, (0.0, set()))
             pairs[key] = (
                 max(score, previous_score),
@@ -876,7 +963,7 @@ def _generate_global_edges(
     ka: CourseKnowledgeGraph,
     outline: DocumentOutline,
     nodes: list[CourseNode],
-    embeddings: list[list[float]],
+    embeddings: list[list[float] | None],
     existing_edges: list[CourseEdge],
     checkpoint: RunCheckpoint,
     options: PipelineOptions,
@@ -952,8 +1039,10 @@ def _generate_global_edges(
                 absolute_start = offset + part_offset + 1
                 absolute_end = absolute_start + len(part) - 1
                 result = _retry(
-                    lambda text=text: ka.global_edge_extractor.invoke(
-                        {"candidates": text}
+                    lambda text=text: _with_model_request_metadata(
+                        ka,
+                        lambda: ka.global_edge_extractor.invoke({"candidates": text}),
+                        batch_id=part_path.stem,
                     ),
                     checkpoint=checkpoint,
                     stage="global_edges",
@@ -961,6 +1050,7 @@ def _generate_global_edges(
                         f"生成跨章关系候选 {absolute_start}-{absolute_end} / {len(candidates)}"
                     ),
                     attempts=options.retry_attempts,
+                    recovery=options.recovery,
                     heartbeat_interval=options.heartbeat_interval,
                 )
                 part_edges = result.items if isinstance(result, CourseEdgeList) else []
@@ -1333,8 +1423,12 @@ def run_course_document(
             "community": CommunityReport.model_json_schema(),
         }
     )
+    option_config = dict(options.__dict__)
+    option_config.pop("recovery", None)
+    if options.recovery is not None:
+        option_config["recovery"] = options.recovery.model_dump(mode="json")
     config = {
-        **options.__dict__,
+        **option_config,
         "method": "course_knowledge_graph",
         "pipeline_version": 3,
         "input_format": resolved_input_format,
@@ -1346,8 +1440,9 @@ def run_course_document(
         "llm_model": str(llm_model or "unknown"),
         "llm_base_url": str(llm_base or ""),
         "llm_profile": os.environ.get("HYPER_EXTRACT_LLM_PROFILE", ""),
-        "structured_output_mode": os.environ.get(
-            "HYPER_EXTRACT_STRUCTURED_OUTPUT_MODE", "auto"
+        "structured_output_mode": (
+            getattr(ka, "structured_output_mode", None)
+            or os.environ.get("HYPER_EXTRACT_STRUCTURED_OUTPUT_MODE", "auto")
         ),
         "embedder_model": str(embed_model or "unknown"),
         "model_profile_fingerprint": str(getattr(ka, "model_profile_fingerprint", "")),
@@ -1575,8 +1670,8 @@ def run_course_document(
             merge_log = cached_dedup.get("merge_log", [])
             embeddings = cached_dedup.get("embeddings") or []
             if nodes and not embeddings:
-                embeddings = ka.embedder.embed_documents(
-                    [f"{node.name}\n{node.summary}" for node in nodes]
+                embeddings = _embed_documents_with_quarantine(
+                    ka.embedder, [f"{node.name}\n{node.summary}" for node in nodes]
                 )
             checkpoint.emit("deduplicate", "progress", "恢复全书去重结果")
         else:
@@ -1720,12 +1815,19 @@ def run_course_document(
                     else:
                         report = _retry(
                             lambda community_id=community_id, community=community: (
-                                ka.summarize_community(community_id, community)
+                                _with_model_request_metadata(
+                                    ka,
+                                    lambda: ka.summarize_community(
+                                        community_id, community
+                                    ),
+                                    batch_id=community_id,
+                                )
                             ),
                             checkpoint=checkpoint,
                             stage="communities",
                             message=f"生成社区摘要 {index}/{len(community_items)}",
                             attempts=options.retry_attempts,
+                            recovery=options.recovery,
                             heartbeat_interval=options.heartbeat_interval,
                         )
                         if report is not None:
@@ -1786,6 +1888,9 @@ def run_course_document(
             ),
             output_cost_per_million=_optional_non_negative_float(
                 "HYPER_EXTRACT_OUTPUT_COST_PER_MILLION"
+            ),
+            embedding_input_cost_per_million=_optional_non_negative_float(
+                "HYPER_EXTRACT_EMBEDDING_INPUT_COST_PER_MILLION"
             ),
             currency=os.environ.get("HYPER_EXTRACT_COST_CURRENCY"),
         )
@@ -1870,33 +1975,188 @@ def run_course_document(
 def _run_rejection_summary(root: Path) -> dict[str, Any]:
     counts = {"total": 0, "quarantined": 0, "repaired": 0, "failed": 0}
     affected: dict[str, int] = {}
+    affected_requests: set[str] = set()
+    affected_chunks: set[str] = set()
+    affected_batches: set[str] = set()
+    unknown_endpoints: set[str] = set()
+    connectivity_warnings: set[str] = set()
+    rejected_edges: list[tuple[str, str]] = []
     rejection_root = root / "rejections"
-    if not rejection_root.exists():
-        return {
-            **counts,
-            "affected_endpoints": affected,
-            "graph_connectivity_incomplete": False,
-        }
-    for path in rejection_root.glob("*.jsonl"):
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
+    final_items: dict[tuple[Any, ...], dict[str, Any]] = {}
+    if rejection_root.exists():
+        for path in rejection_root.glob("*.jsonl"):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                identity = (
+                    (item.get("rejection_id"),)
+                    if item.get("rejection_id")
+                    else (
+                        item.get("request_id"),
+                        item.get("stage"),
+                        item.get("chunk_id"),
+                        item.get("batch_id"),
+                        item.get("schema_path"),
+                        json.dumps(item.get("raw_item"), sort_keys=True, default=str),
+                    )
+                )
+                final_items[identity] = item
+    for item in final_items.values():
+        action = str(item.get("action") or "failed")
+        counts["total"] += 1
+        if action in counts:
+            counts[action] += 1
+        if action != "quarantined":
+            continue
+        _add_lineage(affected_requests, item.get("request_id"))
+        _add_lineage(affected_chunks, item.get("chunk_id"))
+        _add_lineage(affected_batches, item.get("batch_id"))
+        raw = item.get("raw_item")
+        if isinstance(raw, dict):
+            endpoints: dict[str, str] = {}
+            for key in ("source", "target"):
+                endpoint = raw.get(key)
+                if endpoint:
+                    value = str(endpoint)
+                    endpoints[key] = value
+                    affected[value] = affected.get(value, 0) + 1
+                elif key in str(item.get("schema_path") or ""):
+                    unknown_endpoints.add(f"{item.get('schema_path')}: missing {key}")
+            if endpoints.keys() >= {"source", "target"}:
+                rejected_edges.append((endpoints["source"], endpoints["target"]))
+    structured_quarantined = counts["quarantined"]
+    validation_root = root / "validation"
+    if validation_root.exists():
+        for path in validation_root.glob("*.json"):
             try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
+                validation = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
                 continue
-            action = str(item.get("action") or "failed")
-            counts["total"] += 1
-            if action in counts:
-                counts[action] += 1
-            raw = item.get("raw_item")
-            if isinstance(raw, dict):
-                for key in ("source", "target"):
-                    endpoint = raw.get(key)
-                    if endpoint:
-                        affected[str(endpoint)] = affected.get(str(endpoint), 0) + 1
+            unknown_endpoints.update(validation.get("unknown_endpoints") or [])
+            connectivity_warnings.update(validation.get("connectivity_warnings") or [])
+    embedding_requests = 0
+    embedding_quarantined = 0
+    embedding_root = root / "embedding-rejections"
+    if embedding_root.exists():
+        for path in embedding_root.glob("*.json"):
+            try:
+                item = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            embedding_requests += 1
+            quarantined_items = item.get("quarantined_items") or []
+            embedding_quarantined += len(quarantined_items)
+            if quarantined_items or item.get("validation_warnings"):
+                _add_lineage(affected_requests, item.get("request_id"))
+    counts["total"] += embedding_quarantined
+    counts["quarantined"] += embedding_quarantined
+    connectivity = _rejection_connectivity_impact(root.parent, rejected_edges)
+    unknown_endpoints.update(connectivity.pop("unresolved_endpoints"))
+    if connectivity["newly_isolated_nodes"]:
+        connectivity_warnings.add(
+            "Quarantined relationships left previously connected knowledge nodes "
+            "isolated"
+        )
+    if connectivity["additional_connected_components"]:
+        connectivity_warnings.add(
+            "Quarantined relationships increased semantic connected components"
+        )
     return {
         **counts,
         "affected_endpoints": affected,
-        "graph_connectivity_incomplete": counts["quarantined"] > 0,
+        "unknown_endpoints": sorted(unknown_endpoints),
+        "affected_requests": sorted(affected_requests),
+        "affected_chunks": sorted(affected_chunks),
+        "affected_batches": sorted(affected_batches),
+        "connectivity_warnings": sorted(connectivity_warnings),
+        "graph_connectivity_incomplete": structured_quarantined > 0,
+        **connectivity,
+        "embedding_quality_incomplete": embedding_quarantined > 0,
+        "embedding_requests_with_warnings": embedding_requests,
+        "embedding_quarantined": embedding_quarantined,
     }
+
+
+def _add_lineage(target: set[str], value: Any) -> None:
+    if value is not None and str(value):
+        target.add(str(value))
+
+
+def _rejection_connectivity_impact(
+    output: Path, rejected_edges: list[tuple[str, str]]
+) -> dict[str, Any]:
+    empty = {
+        "newly_isolated_nodes": [],
+        "semantic_connected_components": 0,
+        "additional_connected_components": 0,
+        "unresolved_endpoints": set(),
+    }
+    graph_path = output / "course-graph.json"
+    if not graph_path.is_file():
+        return empty
+    try:
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return empty
+    nodes = graph.get("knowledge_nodes") or []
+    node_ids = {str(node.get("id")) for node in nodes if node.get("id")}
+    aliases: dict[str, str] = {}
+    for node in nodes:
+        node_id = node.get("id")
+        if not node_id:
+            continue
+        aliases[str(node_id)] = str(node_id)
+        if node.get("name"):
+            aliases[str(node["name"])] = str(node_id)
+    current = {node_id: set() for node_id in node_ids}
+    for edge in graph.get("semantic_edges") or []:
+        source = str(edge.get("source_id") or "")
+        target = str(edge.get("target_id") or "")
+        if source in current and target in current:
+            current[source].add(target)
+            current[target].add(source)
+    hypothetical = {node_id: set(neighbors) for node_id, neighbors in current.items()}
+    unresolved: set[str] = set()
+    for source_value, target_value in rejected_edges:
+        source = aliases.get(source_value)
+        target = aliases.get(target_value)
+        if source is None:
+            unresolved.add(source_value)
+        if target is None:
+            unresolved.add(target_value)
+        if source is not None and target is not None and source != target:
+            hypothetical[source].add(target)
+            hypothetical[target].add(source)
+    current_components = _component_count(current)
+    hypothetical_components = _component_count(hypothetical)
+    newly_isolated = sorted(
+        node_id
+        for node_id in node_ids
+        if not current[node_id] and bool(hypothetical[node_id])
+    )
+    return {
+        "newly_isolated_nodes": newly_isolated,
+        "semantic_connected_components": current_components,
+        "additional_connected_components": max(
+            0, current_components - hypothetical_components
+        ),
+        "unresolved_endpoints": unresolved,
+    }
+
+
+def _component_count(adjacency: dict[str, set[str]]) -> int:
+    remaining = set(adjacency)
+    components = 0
+    while remaining:
+        components += 1
+        pending = [remaining.pop()]
+        while pending:
+            current = pending.pop()
+            unseen = adjacency[current] & remaining
+            remaining.difference_update(unseen)
+            pending.extend(unseen)
+    return components

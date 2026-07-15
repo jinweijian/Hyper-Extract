@@ -87,7 +87,10 @@ cp docker/.env.example docker/.env
 
 `docker/.env` is the single operator file. The Worker loads it via
 `env_file: .env` (so it receives the provider keys); the API does **not** load
-it, so it never sees model secrets. The same file supplies the interpolation
+it, so it never sees model secrets. For the environment-derived default Profile,
+Compose passes only the non-secret model names and base URLs to the API; this
+lets the API and Worker compute the same secret-free Profile fingerprint. The
+same file supplies the interpolation
 variables (`POSTGRES_PASSWORD`, `EXCHANGE_VOLUME_NAME`, `API_NETWORK_NAME`,
 `HE_API_PORT`, `PLATFORM`, `HE_IMAGE`, `MODEL_PROFILES_FILE`).
 
@@ -99,6 +102,22 @@ Both the API and the Worker mount the same Model Profile TOML at
 `/run/config/model-profiles.toml`. The API computes the secret-free Profile
 fingerprint; the Worker additionally resolves the named secret env vars at run
 time.
+
+The example Profile starts with `probe_required = false`, so a fresh stack can
+run using its conservative declared capabilities. To require observed provider
+conformance in production, first create evidence in the persistent exchange
+volume:
+
+```sh
+docker compose --env-file docker/.env -f docker/service.compose.yml run --rm \
+  he-worker he model probe --profile minimax-m27 \
+  --file /run/config/model-profiles.toml
+```
+
+The Worker stores probe evidence under `/exchange/probes` via `HE_PROBE_ROOT`.
+After the command succeeds, set `probe_required = true` in the mounted Profile
+file and restart the Worker. Evidence survives container replacement with the
+rest of the exchange volume.
 
 ## Running the stack
 
@@ -152,7 +171,9 @@ Run exactly one Worker process until a shared PostgreSQL/Redis rate-limit-group
 coordinator is configured. Database leases prevent duplicate run ownership, but
 they do not coordinate provider concurrency, RPM/TPM pause windows, or circuit
 breaker state. `HE_SERVICE_WORKER_PROCESSES` therefore rejects values other than
-`1`; do not use Compose `--scale` for Workers in this release.
+`1`. The running Worker also holds an exclusive `/exchange/.he-worker.lock`, so
+an accidentally scaled second replica exits instead of creating an independent
+quota coordinator; do not use Compose `--scale` for Workers in this release.
 
 Crashed Workers' expired leases are requeued with `resume_from_checkpoint=true`
 up to a bounded recovery count. Every progress, failure, cancellation,

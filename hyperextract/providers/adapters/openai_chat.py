@@ -72,15 +72,38 @@ class OpenAIChatAdapter:
 
         choice = choices[0]
         message = getattr(choice, "message", None)
-        tool_text = _tool_arguments(message)
-        normalized = (
-            normalize_generation_payload(tool_text)
-            if request.structured_output_mode == "tool" and tool_text is not None
-            else normalize_generation_payload(
-                message,
-                reasoning_content_mode=self.capabilities.reasoning_content_mode,
+        try:
+            finish_reason = getattr(choice, "finish_reason", None)
+            refusal = _message_value(message, "refusal")
+            if finish_reason == "content_filter" or refusal:
+                raise ValueError("provider refused or filtered the response")
+            tool_text = _tool_arguments(message)
+            normalized = (
+                normalize_generation_payload(tool_text)
+                if request.structured_output_mode == "tool" and tool_text is not None
+                else normalize_generation_payload(
+                    message,
+                    reasoning_content_mode=self.capabilities.reasoning_content_mode,
+                )
             )
-        )
+        except Exception as error:
+            finish_reason = getattr(choice, "finish_reason", None)
+            refusal = _message_value(message, "refusal")
+            reason = (
+                "content_filtered"
+                if finish_reason == "content_filter" or refusal
+                else "invalid_response"
+            )
+            failure = canonicalize_provider_error(
+                error,
+                request_id=request.request_id,
+                category="protocol",
+                reason=reason,
+                secret_values=(self._api_key,),
+            )
+            raise GenerationAdapterError(
+                str(failure.raw_message), failure=failure
+            ) from error
         usage = getattr(response, "usage", None)
         return GenerationResponse(
             request_id=request.request_id,
@@ -227,3 +250,9 @@ def _tool_arguments(message: Any) -> str | None:
     else:
         arguments = getattr(function, "arguments", None)
     return str(arguments) if arguments is not None else None
+
+
+def _message_value(message: Any, name: str) -> Any:
+    if isinstance(message, dict):
+        return message.get(name)
+    return getattr(message, name, None)

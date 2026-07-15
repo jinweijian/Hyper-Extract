@@ -62,16 +62,31 @@ class AnthropicAdapter:
             raise GenerationAdapterError(
                 str(failure.raw_message), failure=failure
             ) from error
-        content = getattr(response, "content", [])
-        tool_text = _tool_input(content)
-        normalized = (
-            normalize_generation_payload(tool_text)
-            if request.structured_output_mode == "tool" and tool_text is not None
-            else normalize_generation_payload(
-                content,
-                reasoning_content_mode=self.capabilities.reasoning_content_mode,
+        try:
+            content = getattr(response, "content", [])
+            stop_reason = getattr(response, "stop_reason", None)
+            if stop_reason in {"refusal", "content_filter", "safety"}:
+                raise ValueError("provider refused or filtered the response")
+            tool_text = _tool_input(content)
+            normalized = (
+                normalize_generation_payload(tool_text)
+                if request.structured_output_mode == "tool" and tool_text is not None
+                else normalize_generation_payload(
+                    content,
+                    reasoning_content_mode=self.capabilities.reasoning_content_mode,
+                )
             )
-        )
+        except Exception as error:
+            failure = canonicalize_provider_error(
+                error,
+                request_id=request.request_id,
+                category="protocol",
+                reason="invalid_response",
+                secret_values=(self._api_key,),
+            )
+            raise GenerationAdapterError(
+                str(failure.raw_message), failure=failure
+            ) from error
         usage = getattr(response, "usage", None)
         return GenerationResponse(
             request_id=request.request_id,
@@ -116,6 +131,11 @@ class AnthropicAdapter:
             if mode not in self.capabilities.structured_output_modes:
                 raise ProfileConfigurationError(
                     f"Structured output mode {mode!r} is not declared",
+                    code="STRUCTURED_OUTPUT_MODE_UNSUPPORTED",
+                )
+            if mode == "native":
+                raise ProfileConfigurationError(
+                    "Anthropic Messages does not implement native structured output",
                     code="STRUCTURED_OUTPUT_MODE_UNSUPPORTED",
                 )
             if mode == "tool":

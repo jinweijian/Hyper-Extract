@@ -95,6 +95,33 @@ def test_fallback_order_contains_auto_rejected():
         )
 
 
+def test_auto_cannot_be_declared_as_provider_capability():
+    with pytest.raises(ValidationError, match="auto"):
+        ProfileCapabilities(
+            structured_output_modes=["auto"],
+            preferred_structured_output_mode="auto",
+        )
+
+
+def test_profile_models_reject_unknown_fields():
+    with pytest.raises(ValidationError, match="transient_retry_atempts"):
+        ModelProfile(
+            name="test",
+            llm="openai:gpt-4o@https://api.openai.com/v1",
+            llm_api_key_env="OPENAI_API_KEY",
+            recovery={"transient_retry_atempts": 0},
+        )
+
+
+def test_anthropic_profile_rejects_unimplemented_native_mode():
+    with pytest.raises(ValidationError, match="does not implement native"):
+        ProfileCapabilities(
+            transport="anthropic_messages",
+            structured_output_modes=["native", "text_json"],
+            preferred_structured_output_mode="native",
+        )
+
+
 def test_public_fingerprint_is_stable_across_calls():
     profile = ModelProfile(
         name="test",

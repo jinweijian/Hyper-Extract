@@ -81,6 +81,24 @@ class ModelProfileRegistry:
     def public_descriptor(self, name: str) -> dict[str, object]:
         return self.providers.public_descriptor(name)
 
+    def validate(
+        self,
+        name: str,
+        *,
+        require_secrets: bool = True,
+        require_embedder: bool = False,
+        check_probe: bool = False,
+    ) -> list[str]:
+        return self.providers.validate(
+            name,
+            require_secrets=require_secrets,
+            require_embedder=require_embedder,
+            check_probe=check_probe,
+        )
+
+    def readiness_profiles(self) -> list[str]:
+        return self.providers.readiness_profiles()
+
     def resolve_runtime(self, name: str) -> ResolvedModelProfile:
         profile = self.providers.get(name)
         llm_api_key = self.providers._required_env(profile.llm_api_key_env)

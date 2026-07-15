@@ -101,6 +101,8 @@ def _normalize_blocks(blocks: list[Any], mode: str) -> NormalizedText:
         reasoning_parts.insert(0, inline.reasoning_text or "")
         final = inline.final_text
     reasoning = "\n".join(filter(None, reasoning_parts)) if reasoning_parts else None
+    if not final.strip():
+        raise NormalizationError("Model response does not contain final text content")
     return NormalizedText(final, reasoning)
 
 

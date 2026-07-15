@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+ProviderOutputMode = Literal["native", "tool", "json_object", "text_json"]
 OutputMode = Literal["auto", "native", "tool", "json_object", "text_json"]
 
 
@@ -69,9 +70,11 @@ class EmbeddingResponse(BaseModel):
 
 class ModelCapabilities(BaseModel):
     transport: Literal["openai_chat", "anthropic_messages"]
-    structured_output_modes: list[OutputMode]
-    preferred_structured_output_mode: OutputMode
-    structured_output_fallback_order: list[OutputMode] = Field(default_factory=list)
+    structured_output_modes: list[ProviderOutputMode]
+    preferred_structured_output_mode: ProviderOutputMode
+    structured_output_fallback_order: list[ProviderOutputMode] = Field(
+        default_factory=list
+    )
     reasoning_content_mode: Literal[
         "none", "inline_tags", "separate_field", "content_blocks"
     ]
@@ -93,6 +96,10 @@ class EmbeddingCapabilities(BaseModel):
     max_input_tokens_per_item: int | None = None
     supports_dimensions: bool = False
     empty_input_policy: Literal["reject", "quarantine", "zero_vector"] = "reject"
+    item_failure_policy: Literal["quarantine", "fail"] = "quarantine"
+    recommended_concurrency: int = 1
+    requests_per_minute: int | None = None
+    tokens_per_minute: int | None = None
 
 
 class CanonicalModelFailure(BaseModel):
@@ -106,11 +113,14 @@ class CanonicalModelFailure(BaseModel):
 
 
 class RejectedItem(BaseModel):
+    rejection_id: str
     request_id: str
     stage: str
     schema_path: str
     category: str = "item_validation"
     raw_item: Any
+    validation_attempt: int = 0
+    repair_attempt: int = 0
     action: Literal["quarantined", "repaired", "failed"] = "quarantined"
     chunk_id: str | None = None
     batch_id: str | None = None

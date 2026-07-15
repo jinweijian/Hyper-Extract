@@ -75,3 +75,39 @@ def test_usage_tracker_resumes_existing_counts(tmp_path):
     assert snapshot["successful_calls"] == 1
     assert snapshot["failed_calls"] == 1
     assert snapshot["elapsed_seconds"] == 3.0
+
+
+def test_usage_tracker_records_embedding_attempts_and_recovery_actions(tmp_path):
+    path = tmp_path / "model-usage.json"
+    tracker = ModelUsageTracker()
+    tracker.attach(path)
+
+    tracker.record_embedding_event(
+        {
+            "type": "attempt",
+            "operation": "embedding",
+            "request_id": "embedding-1",
+            "estimated_input_tokens": 9,
+            "input_tokens": 7,
+            "elapsed_seconds": 0.25,
+            "error": None,
+        }
+    )
+    tracker.record_embedding_event(
+        {
+            "type": "recovery",
+            "operation": "embedding",
+            "request_id": "embedding-1",
+            "action": "split",
+            "reason": "invalid_input",
+            "failure_category": "protocol",
+        }
+    )
+
+    snapshot = tracker.snapshot()
+    assert snapshot["total_calls"] == 1
+    assert snapshot["input_tokens"] == 7
+    assert snapshot["by_operation"]["embedding"]["calls"] == 1
+    assert snapshot["by_mode"]["embedding"]["calls"] == 1
+    assert snapshot["total_recovery_actions"] == 1
+    assert snapshot["by_recovery_action"] == {"split": 1}

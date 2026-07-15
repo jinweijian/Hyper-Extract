@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperextract.providers.normalization import (
+    NormalizationError,
     TruncatedJSONError,
     extract_json_value,
     normalize_generation_payload,
@@ -28,6 +29,14 @@ def test_normalizes_content_blocks():
     )
     assert result.final_text == "visible"
     assert result.reasoning_text == "hidden"
+
+
+def test_reasoning_only_blocks_are_not_accepted_as_final_response():
+    with pytest.raises(NormalizationError, match="final text"):
+        normalize_generation_payload(
+            [{"type": "thinking", "thinking": "hidden"}],
+            reasoning_content_mode="content_blocks",
+        )
 
 
 def test_extract_json_tracks_strings_and_escapes():

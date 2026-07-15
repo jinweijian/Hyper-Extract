@@ -78,6 +78,16 @@ def _classify(
             for marker in ("unsupported parameter", "unknown parameter")
         ):
             return "unsupported_parameter", "parameter_rejected"
+        if any(
+            marker in joined
+            for marker in (
+                "invalid input",
+                "input is invalid",
+                "embedding input",
+                "invalid embedding",
+            )
+        ):
+            return "protocol", "invalid_input"
         return "protocol", "bad_request"
     lowered_name = error_name.lower()
     if "timeout" in lowered_name or "connection" in lowered_name:

@@ -6,6 +6,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Iterator
 
+from hyperextract.providers.contracts import ProfileConfigurationError
+
 
 class CircuitOpenError(RuntimeError):
     pass
@@ -133,8 +135,11 @@ class RateLimitGroupScheduler:
     ) -> None:
         self.group = group
         self.configured_concurrency = max(1, max_concurrency)
+        self.recommended_concurrency = max(1, recommended_concurrency)
+        self.requests_per_minute = requests_per_minute
+        self.tokens_per_minute = tokens_per_minute
         self.effective_concurrency = max(
-            1, min(self.configured_concurrency, recommended_concurrency)
+            1, min(self.configured_concurrency, self.recommended_concurrency)
         )
         self._clock = clock
         self._condition = threading.Condition()
@@ -269,7 +274,54 @@ class SchedulerRegistry:
                     tokens_per_minute=tokens_per_minute,
                 )
                 self._groups[group] = scheduler
+            else:
+                expected = (
+                    max(1, max_concurrency),
+                    max(1, recommended_concurrency),
+                    requests_per_minute,
+                    tokens_per_minute,
+                )
+                actual = (
+                    scheduler.configured_concurrency,
+                    scheduler.recommended_concurrency,
+                    scheduler.requests_per_minute,
+                    scheduler.tokens_per_minute,
+                )
+                if actual != expected:
+                    raise ProfileConfigurationError(
+                        f"Rate-limit group {group!r} was configured inconsistently: "
+                        f"existing={actual}, requested={expected}",
+                        code="RATE_LIMIT_GROUP_CONFIG_CONFLICT",
+                    )
             return scheduler
 
 
 PROCESS_SCHEDULERS = SchedulerRegistry()
+
+
+class CircuitBreakerRegistry:
+    """Process-local circuit breakers keyed by shared provider quota group."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._groups: dict[str, CircuitBreaker] = {}
+
+    def get(
+        self,
+        group: str,
+        *,
+        failure_threshold: int = 5,
+        cooldown_seconds: float = 60,
+    ) -> CircuitBreaker:
+        with self._lock:
+            breaker = self._groups.get(group)
+            if breaker is None:
+                breaker = CircuitBreaker(
+                    failure_threshold=failure_threshold,
+                    cooldown_seconds=cooldown_seconds,
+                )
+                self._groups[group] = breaker
+            return breaker
+
+
+PROCESS_CIRCUIT_BREAKERS = CircuitBreakerRegistry()

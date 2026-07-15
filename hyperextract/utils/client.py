@@ -327,6 +327,59 @@ def _parse_client_spec(
     }
 
 
+def _create_profile_chat_model(
+    registry: Any,
+    profile: Any,
+    *,
+    api_key: str,
+    **kwargs: Any,
+) -> BaseChatModel:
+    from hyperextract.providers.gateway import ModelExecutionGateway
+    from hyperextract.providers.langchain import AdapterChatModel
+    from hyperextract.providers.registry import parse_model_reference
+    from hyperextract.providers.scheduling import (
+        PROCESS_CIRCUIT_BREAKERS,
+        PROCESS_SCHEDULERS,
+    )
+
+    capabilities = profile.capabilities
+    max_concurrency = int(
+        kwargs.pop("max_workers", capabilities.recommended_concurrency)
+    )
+    kwargs.pop("max_retries", None)
+    group = profile.llm_rate_limit_group or profile.name
+    scheduler = PROCESS_SCHEDULERS.get(
+        group,
+        max_concurrency=max_concurrency,
+        recommended_concurrency=capabilities.recommended_concurrency,
+        requests_per_minute=capabilities.requests_per_minute,
+        tokens_per_minute=capabilities.tokens_per_minute,
+    )
+    gateway = ModelExecutionGateway(
+        registry.create_generation_adapter(profile.name, api_key=api_key),
+        profile,
+        scheduler=scheduler,
+        circuit_breaker=PROCESS_CIRCUIT_BREAKERS.get(group),
+    )
+    reference = parse_model_reference(profile.llm)
+    return AdapterChatModel(
+        gateway,
+        model_name=reference.model,
+        temperature=kwargs.pop("temperature", None),
+        max_output_tokens=kwargs.pop(
+            "max_output_tokens",
+            kwargs.pop(
+                "max_tokens",
+                profile.max_tokens or capabilities.max_output_tokens,
+            ),
+        ),
+        timeout_seconds=kwargs.pop(
+            "timeout_seconds", kwargs.pop("timeout", profile.request_timeout)
+        ),
+        **kwargs,
+    )
+
+
 def create_llm(
     spec: str | dict | None = None,
     *,
@@ -354,7 +407,6 @@ def create_llm(
         from hyperextract.providers.registry import (
             DEFAULT_PROFILE_NAME,
             ProviderRegistry,
-            parse_model_reference,
         )
 
         registry = ProviderRegistry(Path(profile_path) if profile_path else None)
@@ -362,17 +414,12 @@ def create_llm(
         from hyperextract.providers.probe import ensure_probe_eligibility
 
         ensure_probe_eligibility(profile)
-        reference = parse_model_reference(profile.llm)
         api_key = api_key or registry._required_env(profile.llm_api_key_env)
-        spec = {
-            "provider": reference.provider,
-            "model": reference.model,
-            "base_url": reference.base_url or "",
-            "api_key": api_key,
-        }
-        kwargs.setdefault("timeout", profile.request_timeout)
-        kwargs.setdefault(
-            "max_tokens", profile.max_tokens or profile.capabilities.max_output_tokens
+        return _create_profile_chat_model(
+            registry,
+            profile,
+            api_key=api_key,
+            **kwargs,
         )
     config = _parse_client_spec(spec, api_key=api_key, default_kind="llm")
     config.update(kwargs)
@@ -531,10 +578,33 @@ def create_client(
                 "configure EMBEDDING_MODEL/BASE_URL/API_KEY or pass embedder=..."
             )
         llm_key = api_key or registry._required_env(profile.llm_api_key_env)
-        embedder_key = registry._required_env(profile.embedder_api_key_env)
+        embedding_capabilities = profile.embedding_capabilities
+        if embedding_capabilities is None:
+            raise ValueError("The selected model profile has no embedding capabilities")
+        from hyperextract.providers.langchain import AdapterEmbeddings
+        from hyperextract.providers.scheduling import PROCESS_SCHEDULERS
+
+        embedding_scheduler = PROCESS_SCHEDULERS.get(
+            profile.embedder_rate_limit_group or f"{profile.name}:embedding",
+            max_concurrency=embedding_capabilities.recommended_concurrency,
+            recommended_concurrency=embedding_capabilities.recommended_concurrency,
+            requests_per_minute=embedding_capabilities.requests_per_minute,
+            tokens_per_minute=embedding_capabilities.tokens_per_minute,
+        )
+
         return (
-            create_llm(profile.llm, api_key=llm_key, **kwargs),
-            create_embedder(profile.embedder, api_key=embedder_key),
+            _create_profile_chat_model(
+                registry,
+                profile,
+                api_key=llm_key,
+                **kwargs,
+            ),
+            AdapterEmbeddings(
+                registry.create_embedding_adapter(
+                    profile.name,
+                    scheduler=embedding_scheduler,
+                )
+            ),
         )
 
     if llm is None and embedder is None:

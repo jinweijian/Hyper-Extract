@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+import time
+from typing import Any, Callable, Literal
 
 from hyperextract.providers.adapters.base import AdapterError
 from hyperextract.providers.contracts import (
@@ -12,6 +13,8 @@ from hyperextract.providers.contracts import (
     EmbeddingResponse,
     ProfileConfigurationError,
 )
+from hyperextract.providers.failures import canonicalize_provider_error
+from hyperextract.providers.scheduling import RateLimitGroupScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +49,9 @@ class OpenAIEmbeddingAdapter:
         max_retries: int = 2,
         encoding: Any | None = None,
         warning_sink: Callable[[dict[str, Any]], None] | None = None,
+        usage_sink: Callable[[dict[str, Any]], None] | None = None,
+        item_failure_policy: Literal["quarantine", "fail"] = "quarantine",
+        scheduler: RateLimitGroupScheduler | None = None,
     ) -> None:
         self._model = model
         self._base_url = base_url
@@ -53,6 +59,9 @@ class OpenAIEmbeddingAdapter:
         self._capabilities = capabilities
         self._max_retries = max_retries
         self._warning_sink = warning_sink
+        self._usage_sink = usage_sink
+        self._item_failure_policy = item_failure_policy
+        self._scheduler = scheduler
         if client is not None:
             self._client = client
         else:
@@ -105,61 +114,75 @@ class OpenAIEmbeddingAdapter:
         provider_request_id: str | None = None
         validation_warnings: list[str] = []
         expected_dim: int | None = None
+        quarantined: dict[int, CanonicalModelFailure] = {}
 
         for batch in batches:
-            response = self._call_api(batch, request.dimensions, request.request_id)
-            if len(response.data) != len(batch):
-                raise EmbeddingProtocolError(
-                    f"Protocol error: expected {len(batch)} embeddings, "
-                    f"got {len(response.data)} from provider"
-                )
-            for position, ((payload, orig_idx, _), data_item) in enumerate(
-                zip(batch, response.data, strict=True)
-            ):
-                provider_index = getattr(data_item, "index", position)
-                if provider_index != position:
+            successful, failed = self._call_with_split_recovery(
+                batch, request.dimensions, request.request_id
+            )
+            quarantined.update(failed)
+            for recovered_batch, response in successful:
+                if len(response.data) != len(recovered_batch):
                     raise EmbeddingProtocolError(
-                        "Protocol error: embedding response order does not match "
-                        f"the request (position {position}, provider index "
-                        f"{provider_index})",
-                        indices=[orig_idx],
+                        f"Protocol error: expected {len(recovered_batch)} embeddings, "
+                        f"got {len(response.data)} from provider"
                     )
-                vec = list(data_item.embedding)
-                if request.dimensions is not None and len(vec) != request.dimensions:
-                    raise EmbeddingProtocolError(
-                        "Protocol error: provider returned vector dimension "
-                        f"{len(vec)} instead of requested {request.dimensions}",
-                        indices=[orig_idx],
+                for position, ((_, orig_idx, _), data_item) in enumerate(
+                    zip(recovered_batch, response.data, strict=True)
+                ):
+                    provider_index = getattr(data_item, "index", position)
+                    if provider_index != position:
+                        raise EmbeddingProtocolError(
+                            "Protocol error: embedding response order does not match "
+                            f"the request (position {position}, provider index "
+                            f"{provider_index})",
+                            indices=[orig_idx],
+                        )
+                    vec = list(data_item.embedding)
+                    if (
+                        request.dimensions is not None
+                        and len(vec) != request.dimensions
+                    ):
+                        raise EmbeddingProtocolError(
+                            "Protocol error: provider returned vector dimension "
+                            f"{len(vec)} instead of requested {request.dimensions}",
+                            indices=[orig_idx],
+                        )
+                    if expected_dim is None:
+                        expected_dim = len(vec)
+                    elif len(vec) != expected_dim:
+                        raise EmbeddingProtocolError(
+                            f"Protocol error: inconsistent vector dimensions "
+                            f"(expected {expected_dim}, got {len(vec)})"
+                        )
+                    if orig_idx not in sums:
+                        sums[orig_idx] = vec
+                        counts[orig_idx] = 1
+                    else:
+                        running = sums[orig_idx]
+                        sums[orig_idx] = [
+                            a + b for a, b in zip(running, vec, strict=True)
+                        ]
+                        counts[orig_idx] += 1
+                usage = getattr(response, "usage", None)
+                if usage is not None:
+                    saw_usage = True
+                    prompt_toks = getattr(usage, "prompt_tokens", None)
+                    input_toks = getattr(usage, "input_tokens", None)
+                    batch_tokens = (
+                        prompt_toks if prompt_toks is not None else input_toks
                     )
-                if expected_dim is None:
-                    expected_dim = len(vec)
-                elif len(vec) != expected_dim:
-                    raise EmbeddingProtocolError(
-                        f"Protocol error: inconsistent vector dimensions "
-                        f"(expected {expected_dim}, got {len(vec)})"
-                    )
-                if orig_idx not in sums:
-                    sums[orig_idx] = vec
-                    counts[orig_idx] = 1
-                else:
-                    running = sums[orig_idx]
-                    sums[orig_idx] = [a + b for a, b in zip(running, vec, strict=True)]
-                    counts[orig_idx] += 1
-            usage = getattr(response, "usage", None)
-            if usage is not None:
-                saw_usage = True
-                prompt_toks = getattr(usage, "prompt_tokens", None)
-                input_toks = getattr(usage, "input_tokens", None)
-                batch_tokens = prompt_toks if prompt_toks is not None else input_toks
-                if batch_tokens is not None:
-                    input_tokens_total += batch_tokens
-            rid = getattr(response, "id", None)
-            if rid is not None:
-                provider_request_id = rid
+                    if batch_tokens is not None:
+                        input_tokens_total += batch_tokens
+                rid = getattr(response, "id", None)
+                if rid is not None:
+                    provider_request_id = rid
 
         results: list[list[float] | None] = [None] * n
         dim = expected_dim
         for orig_idx, running in sums.items():
+            if orig_idx in quarantined:
+                continue
             count = counts[orig_idx]
             mean = [v / count for v in running]
             results[orig_idx] = mean
@@ -196,6 +219,25 @@ class OpenAIEmbeddingAdapter:
                         }
                     )
 
+        if quarantined:
+            indices = sorted(quarantined)
+            warning = f"embedding inputs quarantined at indices {indices}"
+            validation_warnings.append(warning)
+            logger.warning("%s", warning)
+            if self._warning_sink:
+                self._warning_sink(
+                    {
+                        "request_id": request.request_id,
+                        "category": "embedding_item_quarantined",
+                        "indices": indices,
+                        "reasons": {
+                            index: failure.reason
+                            for index, failure in quarantined.items()
+                        },
+                        "warning": warning,
+                    }
+                )
+
         items: list[EmbeddingItemResult] = []
         for i in range(n):
             vec = results[i]
@@ -205,7 +247,9 @@ class OpenAIEmbeddingAdapter:
                         input_index=i,
                         vector=None,
                         status="quarantined",
-                        error_reason="empty_input",
+                        error_reason=(
+                            quarantined[i].reason if i in quarantined else "empty_input"
+                        ),
                     )
                 )
             else:
@@ -221,6 +265,12 @@ class OpenAIEmbeddingAdapter:
             raise EmbeddingProtocolError(
                 f"Protocol error: expected {n} items, got {len(items)}"
             )
+        if quarantined and len(quarantined) == n:
+            first = quarantined[min(quarantined)]
+            raise EmbeddingAdapterError(
+                "All embedding inputs failed with item-level provider errors",
+                failure=first,
+            )
 
         return EmbeddingResponse(
             request_id=request.request_id,
@@ -230,6 +280,51 @@ class OpenAIEmbeddingAdapter:
             validation_warnings=validation_warnings,
         )
 
+    def _call_with_split_recovery(
+        self,
+        batch: list[tuple[Any, int, int]],
+        dimensions: int | None,
+        request_id: str,
+    ) -> tuple[
+        list[tuple[list[tuple[Any, int, int]], Any]],
+        dict[int, CanonicalModelFailure],
+    ]:
+        try:
+            response = self._call_api(batch, dimensions, request_id)
+            return [(batch, response)], {}
+        except EmbeddingAdapterError as error:
+            splittable = (
+                error.failure.category == "context_window"
+                or error.failure.reason == "invalid_input"
+            )
+            if not splittable:
+                raise
+            if len(batch) == 1:
+                if self._item_failure_policy == "fail":
+                    raise
+                return [], {batch[0][1]: error.failure}
+            self._emit_usage(
+                {
+                    "type": "recovery",
+                    "operation": "embedding",
+                    "request_id": request_id,
+                    "action": "split",
+                    "reason": error.failure.reason,
+                    "failure_category": error.failure.category,
+                }
+            )
+            middle = len(batch) // 2
+            left_success, left_failed = self._call_with_split_recovery(
+                batch[:middle], dimensions, request_id
+            )
+            right_success, right_failed = self._call_with_split_recovery(
+                batch[middle:], dimensions, request_id
+            )
+            return (
+                [*left_success, *right_success],
+                {**left_failed, **right_failed},
+            )
+
     def _split_texts(
         self, inputs: list[str], blank_indices: set[int]
     ) -> list[tuple[Any, int, int]]:
@@ -238,6 +333,8 @@ class OpenAIEmbeddingAdapter:
             self._capabilities.max_input_tokens_per_item
             or _DEFAULT_MAX_INPUT_TOKENS_PER_ITEM
         )
+        if self._capabilities.max_batch_tokens is not None:
+            max_tokens = min(max_tokens, self._capabilities.max_batch_tokens)
         accepts_token_ids = self._capabilities.accepts_token_ids
         for i, text in enumerate(inputs):
             if i in blank_indices:
@@ -293,56 +390,92 @@ class OpenAIEmbeddingAdapter:
         kwargs: dict[str, Any] = {"input": payload, "model": self._model}
         if dimensions is not None and self._capabilities.supports_dimensions:
             kwargs["dimensions"] = dimensions
-        try:
-            return self._client.embeddings.create(**kwargs)
-        except Exception as e:
-            raise self._wrap_error(e, request_id=request_id) from e
+        return self._scheduled_create(
+            kwargs,
+            estimated_tokens=sum(chunk[2] for chunk in batch),
+            request_id=request_id,
+        )
 
     def _placeholder_probe(self, request_id: str) -> Any:
+        return self._scheduled_create(
+            {"input": _PLACEHOLDER_PROBE_INPUT, "model": self._model},
+            estimated_tokens=1,
+            request_id=request_id,
+        )
+
+    def _scheduled_create(
+        self,
+        kwargs: dict[str, Any],
+        *,
+        estimated_tokens: int,
+        request_id: str,
+    ) -> Any:
+        started = time.monotonic()
+        response = None
         try:
-            return self._client.embeddings.create(
-                input=_PLACEHOLDER_PROBE_INPUT, model=self._model
+            if self._scheduler is None:
+                response = self._client.embeddings.create(**kwargs)
+            else:
+                with self._scheduler.slot(estimated_tokens=estimated_tokens):
+                    response = self._client.embeddings.create(**kwargs)
+                self._scheduler.succeeded()
+        except Exception as error:
+            wrapped = self._wrap_error(error, request_id=request_id)
+            self._emit_usage(
+                {
+                    "type": "attempt",
+                    "operation": "embedding",
+                    "request_id": request_id,
+                    "estimated_input_tokens": estimated_tokens,
+                    "input_tokens": None,
+                    "provider_request_id": None,
+                    "elapsed_seconds": time.monotonic() - started,
+                    "error": wrapped,
+                }
             )
-        except Exception as e:
-            raise self._wrap_error(e, request_id=request_id) from e
+            if self._scheduler is not None and wrapped.failure.category.startswith(
+                "rate_limit."
+            ):
+                self._scheduler.rate_limited(wrapped.failure.retry_after_seconds or 1.0)
+            raise wrapped from error
+        self._emit_usage(
+            {
+                "type": "attempt",
+                "operation": "embedding",
+                "request_id": request_id,
+                "estimated_input_tokens": estimated_tokens,
+                "input_tokens": _response_input_tokens(response),
+                "provider_request_id": getattr(response, "id", None),
+                "elapsed_seconds": time.monotonic() - started,
+                "error": None,
+            }
+        )
+        return response
+
+    def set_usage_sink(self, sink: Callable[[dict[str, Any]], None] | None) -> None:
+        """Attach per-physical-request accounting after pipeline construction."""
+        self._usage_sink = sink
+
+    def _emit_usage(self, event: dict[str, Any]) -> None:
+        if self._usage_sink is not None:
+            self._usage_sink(event)
 
     def _wrap_error(
         self, error: Exception, *, request_id: str
     ) -> EmbeddingAdapterError:
-        from openai import APIConnectionError, APITimeoutError
-
-        status = getattr(error, "status_code", None)
-        if isinstance(error, (APITimeoutError, APIConnectionError)):
-            category = "transient"
-            reason = "connection_or_timeout"
-        elif status is None:
-            category = "unknown"
-            reason = "no_status"
-        elif status in (401, 403):
-            category = "authentication"
-            reason = "auth_failed"
-        elif status == 429:
-            category = "rate_limit.requests"
-            reason = "rate_limited"
-        elif status >= 500:
-            category = "transient"
-            reason = "server_error"
-        elif status == 400:
-            category = "protocol"
-            reason = "bad_request"
-        else:
-            category = "unknown"
-            reason = f"unhandled_status_{status}"
-
-        raw = str(error)
-        if self._api_key and self._api_key in raw:
-            raw = raw.replace(self._api_key, "[REDACTED]")
-
-        failure = CanonicalModelFailure(
+        failure = canonicalize_provider_error(
+            error,
             request_id=request_id,
-            category=category,
-            reason=reason,
-            http_status=status,
-            raw_message=raw,
+            secret_values=(self._api_key,),
         )
-        return EmbeddingAdapterError(raw, failure=failure)
+        return EmbeddingAdapterError(str(failure.raw_message), failure=failure)
+
+
+def _response_input_tokens(response: Any) -> int | None:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+    prompt_tokens = getattr(usage, "prompt_tokens", None)
+    input_tokens = getattr(usage, "input_tokens", None)
+    value = prompt_tokens if prompt_tokens is not None else input_tokens
+    return int(value) if value is not None else None

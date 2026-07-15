@@ -72,6 +72,9 @@ def _empty() -> dict[str, Any]:
         "elapsed_seconds": 0.0,
         "by_operation": {},
         "by_mode": {},
+        "total_recovery_actions": 0,
+        "by_recovery_action": {},
+        "recovery_events": [],
     }
 
 
@@ -92,6 +95,7 @@ class ModelUsageTracker:
             if resume and not force and target.exists():
                 loaded = json.loads(target.read_text(encoding="utf-8"))
                 self._data = loaded if isinstance(loaded, dict) else _empty()
+                self._ensure_schema_fields()
             else:
                 self._data = _empty()
                 atomic_write_json(target, self._data)
@@ -117,43 +121,129 @@ class ModelUsageTracker:
             output_tokens = _estimate_tokens(response)
 
         with self._lock:
-            self._data["total_calls"] += 1
-            self._data["successful_calls"] += int(error is None)
-            self._data["failed_calls"] += int(error is not None)
-            self._data["repair_calls"] += int(repair)
-            self._data["provider_reported_calls"] += int(
-                provider_input is not None or provider_output is not None
+            self._record_values_locked(
+                operation=operation,
+                mode=mode,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                elapsed_seconds=elapsed_seconds,
+                successful=error is None,
+                provider_reported=(
+                    provider_input is not None or provider_output is not None
+                ),
+                repair=repair,
             )
-            self._data["input_tokens"] += input_tokens
-            self._data["output_tokens"] += output_tokens
-            self._data["elapsed_seconds"] = round(
-                self._data["elapsed_seconds"] + elapsed_seconds, 6
+
+    def record_embedding_event(self, event: dict[str, Any]) -> None:
+        """Record one physical embedding attempt or split recovery decision."""
+        if event.get("type") == "recovery":
+            self.record_recovery(
+                operation=str(event.get("operation") or "embedding"),
+                mode="embedding",
+                action=str(event.get("action") or "split"),
+                reason=str(event.get("reason") or "embedding_batch_failure"),
+                request_id=str(event.get("request_id") or ""),
+                failure_category=event.get("failure_category"),
             )
-            for dimension, key in (
-                ("by_operation", operation),
-                ("by_mode", mode),
-            ):
-                bucket = self._data[dimension].setdefault(
-                    key,
-                    {
-                        "calls": 0,
-                        "successful_calls": 0,
-                        "failed_calls": 0,
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "elapsed_seconds": 0.0,
-                    },
-                )
-                bucket["calls"] += 1
-                bucket["successful_calls"] += int(error is None)
-                bucket["failed_calls"] += int(error is not None)
-                bucket["input_tokens"] += input_tokens
-                bucket["output_tokens"] += output_tokens
-                bucket["elapsed_seconds"] = round(
-                    bucket["elapsed_seconds"] + elapsed_seconds, 6
-                )
+            return
+        provider_tokens = event.get("input_tokens")
+        estimated_tokens = int(event.get("estimated_input_tokens") or 0)
+        with self._lock:
+            self._record_values_locked(
+                operation=str(event.get("operation") or "embedding"),
+                mode="embedding",
+                input_tokens=(
+                    int(provider_tokens)
+                    if provider_tokens is not None
+                    else estimated_tokens
+                ),
+                output_tokens=0,
+                elapsed_seconds=float(event.get("elapsed_seconds") or 0),
+                successful=event.get("error") is None,
+                provider_reported=provider_tokens is not None,
+                repair=False,
+            )
+
+    def record_recovery(
+        self,
+        *,
+        operation: str,
+        mode: str,
+        action: str,
+        reason: str,
+        request_id: str,
+        failure_category: str | None = None,
+    ) -> None:
+        """Persist an aggregate and bounded audit trail of recovery decisions."""
+        with self._lock:
+            self._ensure_schema_fields()
+            self._data["total_recovery_actions"] += 1
+            actions = self._data["by_recovery_action"]
+            actions[action] = actions.get(action, 0) + 1
+            self._data["recovery_events"].append(
+                {
+                    "operation": operation,
+                    "mode": mode,
+                    "action": action,
+                    "reason": reason,
+                    "request_id": request_id,
+                    "failure_category": failure_category,
+                }
+            )
+            self._data["recovery_events"] = self._data["recovery_events"][-1000:]
             if self._path is not None:
                 atomic_write_json(self._path, self._data)
+
+    def _record_values_locked(
+        self,
+        *,
+        operation: str,
+        mode: str,
+        input_tokens: int,
+        output_tokens: int,
+        elapsed_seconds: float,
+        successful: bool,
+        provider_reported: bool,
+        repair: bool,
+    ) -> None:
+        self._ensure_schema_fields()
+        self._data["total_calls"] += 1
+        self._data["successful_calls"] += int(successful)
+        self._data["failed_calls"] += int(not successful)
+        self._data["repair_calls"] += int(repair)
+        self._data["provider_reported_calls"] += int(provider_reported)
+        self._data["input_tokens"] += input_tokens
+        self._data["output_tokens"] += output_tokens
+        self._data["elapsed_seconds"] = round(
+            self._data["elapsed_seconds"] + elapsed_seconds, 6
+        )
+        for dimension, key in (("by_operation", operation), ("by_mode", mode)):
+            bucket = self._data[dimension].setdefault(
+                key,
+                {
+                    "calls": 0,
+                    "successful_calls": 0,
+                    "failed_calls": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "elapsed_seconds": 0.0,
+                },
+            )
+            bucket["calls"] += 1
+            bucket["successful_calls"] += int(successful)
+            bucket["failed_calls"] += int(not successful)
+            bucket["input_tokens"] += input_tokens
+            bucket["output_tokens"] += output_tokens
+            bucket["elapsed_seconds"] = round(
+                bucket["elapsed_seconds"] + elapsed_seconds, 6
+            )
+        if self._path is not None:
+            atomic_write_json(self._path, self._data)
+
+    def _ensure_schema_fields(self) -> None:
+        defaults = _empty()
+        for key in ("total_recovery_actions", "by_recovery_action", "recovery_events"):
+            self._data.setdefault(key, defaults[key])
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:

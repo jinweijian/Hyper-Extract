@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any
 
@@ -35,7 +36,9 @@ class FakeEmbeddings:
         self._client = client
 
     def create(self, *, input: Any, model: str, dimensions: int | None = None):
-        return self._client._handle_create(input=input, model=model, dimensions=dimensions)
+        return self._client._handle_create(
+            input=input, model=model, dimensions=dimensions
+        )
 
 
 class FakeOpenAIClient:
@@ -69,7 +72,9 @@ class FakeOpenAIClient:
         dim = dimensions or self.default_dim
         data = []
         for position, inp in enumerate(inputs):
-            data.append(SimpleNamespace(embedding=self._make_vector(inp, dim, position)))
+            data.append(
+                SimpleNamespace(embedding=self._make_vector(inp, dim, position))
+            )
         if self.short_by > 0:
             data = data[: max(0, len(data) - self.short_by)]
         usage = SimpleNamespace(prompt_tokens=5, input_tokens=5)
@@ -87,6 +92,25 @@ class FakeOpenAIClient:
         return base[:dim]
 
 
+class SelectiveBadInputClient(FakeOpenAIClient):
+    def _handle_create(self, *, input: Any, model: str, dimensions: int | None):
+        values = input if isinstance(input, list) else [input]
+        self.calls.append({"input": input, "model": model, "dimensions": dimensions})
+        if "bad" in values:
+            error = ValueError("one embedding input is invalid")
+            error.status_code = 400
+            raise error
+        dim = dimensions or self.default_dim
+        return SimpleNamespace(
+            data=[
+                SimpleNamespace(embedding=self._make_vector(value, dim, position))
+                for position, value in enumerate(values)
+            ],
+            usage=SimpleNamespace(prompt_tokens=len(values), input_tokens=len(values)),
+            id="req_split",
+        )
+
+
 def _make_adapter(
     *,
     capabilities: EmbeddingCapabilities | None = None,
@@ -98,7 +122,8 @@ def _make_adapter(
         model="text-embedding-3-small",
         base_url=None,
         api_key=api_key,
-        capabilities=capabilities or EmbeddingCapabilities(transport="openai_embeddings"),
+        capabilities=capabilities
+        or EmbeddingCapabilities(transport="openai_embeddings"),
         client=client if client is not None else FakeOpenAIClient(),
         encoding=encoding,
     )
@@ -137,6 +162,127 @@ def test_batch_splitting_25_inputs_max_batch_items_10():
     assert len(fake.calls[0]["input"]) == 10
     assert len(fake.calls[1]["input"]) == 10
     assert len(fake.calls[2]["input"]) == 5
+
+
+def test_single_chunk_never_exceeds_max_batch_tokens():
+    fake = FakeOpenAIClient(default_dim=4)
+    adapter = _make_adapter(
+        capabilities=EmbeddingCapabilities(
+            transport="openai_embeddings",
+            max_input_tokens_per_item=10,
+            max_batch_tokens=4,
+        ),
+        client=fake,
+        encoding=FakeEncoding(),
+    )
+
+    adapter.embed(EmbeddingRequest(inputs=["abcdef"], request_id="r1"))
+
+    assert [len(value) for call in fake.calls for value in call["input"]] == [4, 2]
+    assert all(
+        sum(len(value) for value in call["input"]) <= 4 for call in fake.calls
+    )
+
+
+def test_scheduler_counts_each_physical_batch_request():
+    class CountingScheduler:
+        calls = 0
+        successes = 0
+
+        @contextmanager
+        def slot(self, *, estimated_tokens=0):
+            self.calls += 1
+            assert estimated_tokens > 0
+            yield
+
+        def succeeded(self):
+            self.successes += 1
+
+        def rate_limited(self, delay_seconds):
+            raise AssertionError(delay_seconds)
+
+    fake = FakeOpenAIClient(default_dim=4)
+    scheduler = CountingScheduler()
+    adapter = OpenAIEmbeddingAdapter(
+        model="text-embedding-3-small",
+        base_url=None,
+        api_key="sk-test",
+        capabilities=EmbeddingCapabilities(
+            transport="openai_embeddings", max_batch_items=2
+        ),
+        client=fake,
+        encoding=FakeEncoding(),
+        scheduler=scheduler,
+    )
+
+    adapter.embed(EmbeddingRequest(inputs=["a", "b", "c", "d", "e"], request_id="r1"))
+
+    assert scheduler.calls == 3
+    assert scheduler.successes == 3
+
+
+def test_failed_batch_is_split_and_only_bad_item_is_quarantined():
+    fake = SelectiveBadInputClient(default_dim=4)
+    adapter = _make_adapter(client=fake)
+
+    response = adapter.embed(
+        EmbeddingRequest(inputs=["good-1", "bad", "good-2"], request_id="r1")
+    )
+
+    assert [item.status for item in response.items] == [
+        "completed",
+        "quarantined",
+        "completed",
+    ]
+    assert response.items[1].vector is None
+    assert response.items[1].error_reason == "invalid_input"
+    assert response.validation_warnings == [
+        "embedding inputs quarantined at indices [1]"
+    ]
+    assert fake.calls[0]["input"] == ["good-1", "bad", "good-2"]
+    assert any(call["input"] == ["bad"] for call in fake.calls)
+
+
+def test_usage_sink_observes_physical_calls_and_split_recovery():
+    events = []
+    adapter = OpenAIEmbeddingAdapter(
+        model="text-embedding-3-small",
+        base_url=None,
+        api_key="sk-test",
+        capabilities=EmbeddingCapabilities(transport="openai_embeddings"),
+        client=SelectiveBadInputClient(default_dim=4),
+        encoding=FakeEncoding(),
+        usage_sink=events.append,
+    )
+
+    adapter.embed(EmbeddingRequest(inputs=["good", "bad"], request_id="r1"))
+
+    attempts = [event for event in events if event["type"] == "attempt"]
+    recoveries = [event for event in events if event["type"] == "recovery"]
+    assert len(attempts) == 3
+    assert [event["error"] is None for event in attempts] == [False, True, False]
+    assert recoveries[0]["action"] == "split"
+
+
+def test_generic_bad_request_is_not_split_or_quarantined():
+    error = ValueError("invalid model configuration")
+    error.status_code = 400
+    fake = FakeOpenAIClient(raise_error=error)
+    adapter = _make_adapter(client=fake)
+
+    with pytest.raises(EmbeddingAdapterError) as raised:
+        adapter.embed(EmbeddingRequest(inputs=["one", "two", "three"], request_id="r1"))
+
+    assert raised.value.failure.reason == "bad_request"
+
+
+def test_all_item_local_embedding_failures_fail_the_request():
+    adapter = _make_adapter(client=SelectiveBadInputClient(default_dim=4))
+
+    with pytest.raises(EmbeddingAdapterError) as raised:
+        adapter.embed(EmbeddingRequest(inputs=["bad"], request_id="r1"))
+
+    assert raised.value.failure.reason == "invalid_input"
 
 
 def test_multi_chunk_mean_vector():
@@ -251,9 +397,7 @@ def test_dimensions_unsupported_raises_before_api_call():
         client=fake,
     )
     with pytest.raises(ProfileConfigurationError) as excinfo:
-        adapter.embed(
-            EmbeddingRequest(inputs=["a"], request_id="r1", dimensions=1024)
-        )
+        adapter.embed(EmbeddingRequest(inputs=["a"], request_id="r1", dimensions=1024))
     assert excinfo.value.code == "EMBEDDING_DIMENSIONS_UNSUPPORTED"
     assert len(fake.calls) == 0
 

@@ -19,13 +19,14 @@ from hyperextract.providers.contracts import (
     ValidationSummary,
 )
 from hyperextract.providers.gateway import ModelExecutionGateway
-from hyperextract.providers.artifacts import ModelArtifactStore
+from hyperextract.providers.artifacts import ModelArtifactStore, redact_sensitive_text
 from hyperextract.providers.normalization import (
     NormalizationError,
     TruncatedJSONError,
     extract_json_value as _extract_json_value,
     normalize_generation_payload,
 )
+from hyperextract.documents.checkpoint import fingerprint
 
 from .model_errors import (
     OutputTruncatedError,
@@ -78,6 +79,7 @@ class StructuredOutputInvoker:
         *,
         mode: OutputMode = "auto",
         repair_attempts: int = 1,
+        validation_retry_attempts: int = 0,
         raw_response_sink: Callable[[str], None] | None = None,
         usage_tracker: ModelUsageTracker | None = None,
         operation: str = "structured_output",
@@ -86,13 +88,14 @@ class StructuredOutputInvoker:
         invalid_item_ratio_threshold: float = 0.2,
         rejection_sink: Callable[[RejectedItem], None] | None = None,
         validation_sink: Callable[[ValidationSummary], None] | None = None,
-        request_metadata: dict[str, str] | None = None,
+        request_metadata: (dict[str, str] | Callable[[], dict[str, str]] | None) = None,
         artifact_store: ModelArtifactStore | None = None,
     ) -> None:
         self.model = model
         self.schema = schema
         self.mode = mode
         self.repair_attempts = max(0, repair_attempts)
+        self.validation_retry_attempts = max(0, validation_retry_attempts)
         self.raw_response_sink = raw_response_sink
         self.usage_tracker = usage_tracker
         self.operation = operation
@@ -101,7 +104,7 @@ class StructuredOutputInvoker:
         self.invalid_item_ratio_threshold = invalid_item_ratio_threshold
         self.rejection_sink = rejection_sink
         self.validation_sink = validation_sink
-        self.request_metadata = request_metadata or {}
+        self._request_metadata_source = request_metadata or {}
         self.artifact_store = artifact_store
         self._local = threading.local()
         self.last_mode: OutputMode | None = None
@@ -126,6 +129,14 @@ class StructuredOutputInvoker:
         self._local.last_validation_summary = value
 
     @property
+    def request_metadata(self) -> dict[str, str]:
+        active = getattr(self._local, "request_metadata", None)
+        if active is not None:
+            return active
+        source = self._request_metadata_source
+        return dict(source() if callable(source) else source)
+
+    @property
     def _request_id(self) -> str:
         return getattr(self._local, "request_id", "")
 
@@ -140,6 +151,22 @@ class StructuredOutputInvoker:
     @_last_raw_text.setter
     def _last_raw_text(self, value: str) -> None:
         self._local.last_raw_text = value
+
+    @property
+    def _repair_attempt(self) -> int:
+        return getattr(self._local, "repair_attempt", 0)
+
+    @_repair_attempt.setter
+    def _repair_attempt(self, value: int) -> None:
+        self._local.repair_attempt = value
+
+    @property
+    def _validation_attempt(self) -> int:
+        return getattr(self._local, "validation_attempt", 0)
+
+    @_validation_attempt.setter
+    def _validation_attempt(self, value: int) -> None:
+        self._local.validation_attempt = value
 
     def as_runnable(self) -> RunnableLambda:
         return RunnableLambda(self.invoke)
@@ -168,20 +195,11 @@ class StructuredOutputInvoker:
                 self.invalid_item_policy == "fail"
                 or ratio > self.invalid_item_ratio_threshold
             ):
-                final_action = (
-                    "failed"
-                    if self.invalid_item_policy == "fail" or self.repair_attempts <= 0
-                    else "repaired"
+                can_repair = (
+                    self.invalid_item_policy != "fail" and self.repair_attempts > 0
                 )
-                rejections = [
-                    rejection.model_copy(update={"action": final_action})
-                    for rejection in rejections
-                ]
-                for rejection in rejections:
-                    if self.rejection_sink:
-                        self.rejection_sink(rejection)
-                    if self.artifact_store:
-                        self.artifact_store.save_rejection(rejection)
+                if not can_repair:
+                    rejections = self._persist_rejections(rejections, "failed")
                 self._emit_summary(
                     valid=max(0, total - len(rejections)),
                     rejected=rejections,
@@ -192,13 +210,10 @@ class StructuredOutputInvoker:
                     raw_response=self._last_raw_text,
                     rejections=rejections,
                 )
-            for rejection in rejections:
-                if self.rejection_sink:
-                    self.rejection_sink(rejection)
-                if self.artifact_store:
-                    self.artifact_store.save_rejection(rejection)
+            rejections = self._persist_rejections(rejections, "quarantined")
+        item_count = self._count_list_items(value)
         self._emit_summary(
-            valid=max(1, self._count_list_items(value) - len(rejections)),
+            valid=max(0, item_count - len(rejections)) if item_count else 1,
             rejected=rejections,
         )
         return result
@@ -254,18 +269,47 @@ class StructuredOutputInvoker:
         first = error.errors()[0] if error.errors() else {}
         suffix = ".".join(str(part) for part in first.get("loc", ()))
         schema_path = f"{field_name}.{index}" + (f".{suffix}" if suffix else "")
+        rejection_id = fingerprint(
+            {
+                "request_id": self._request_id,
+                "stage": self.operation,
+                "chunk_id": self.request_metadata.get("chunk_id"),
+                "batch_id": self.request_metadata.get("batch_id"),
+                "schema_path": schema_path,
+                "raw_item": raw_item,
+            }
+        )
         return RejectedItem(
+            rejection_id=rejection_id,
             request_id=self._request_id,
             stage=self.operation,
             chunk_id=self.request_metadata.get("chunk_id"),
             batch_id=self.request_metadata.get("batch_id"),
             schema_path=schema_path,
             raw_item=raw_item,
+            validation_attempt=self._validation_attempt,
+            repair_attempt=self._repair_attempt,
             error=str(first.get("msg") or error),
             profile_fingerprint=self.request_metadata.get("profile_fingerprint"),
             model_fingerprint=self.request_metadata.get("model_fingerprint"),
             prompt_fingerprint=self.request_metadata.get("prompt_fingerprint"),
         )
+
+    def _persist_rejections(
+        self,
+        rejections: list[RejectedItem],
+        action: Literal["quarantined", "repaired", "failed"],
+    ) -> list[RejectedItem]:
+        final = [
+            rejection.model_copy(update={"action": action})
+            for rejection in _deduplicate_rejections(rejections)
+        ]
+        for rejection in final:
+            if self.rejection_sink:
+                self.rejection_sink(rejection)
+            if self.artifact_store:
+                self.artifact_store.save_rejection(rejection)
+        return final
 
     def _emit_summary(
         self,
@@ -346,22 +390,26 @@ class StructuredOutputInvoker:
     def _invoke_mode(self, prompt: Any, mode: OutputMode) -> T:
         started = time.monotonic()
         response: Any = None
+        gateway_attempts_recorded = False
         try:
             if self.gateway is not None:
-                response = self.gateway.invoke(
-                    GenerationRequest(
-                        operation=self.operation,
-                        messages=_to_model_messages(self._plain_prompt(prompt)),
-                        output_schema=self.schema.model_json_schema(),
-                        structured_output=True,
-                        structured_output_mode=mode,
-                        request_id=self._request_id,
-                        metadata={
-                            **self.request_metadata,
-                            "schema_name": self.schema.__name__,
-                        },
+                try:
+                    response = self.gateway.invoke(
+                        GenerationRequest(
+                            operation=self.operation,
+                            messages=_to_model_messages(self._plain_prompt(prompt)),
+                            output_schema=self.schema.model_json_schema(),
+                            structured_output=True,
+                            structured_output_mode=mode,
+                            request_id=self._request_id,
+                            metadata={
+                                **self.request_metadata,
+                                "schema_name": self.schema.__name__,
+                            },
+                        )
                     )
-                )
+                finally:
+                    gateway_attempts_recorded = self._record_gateway_attempts(prompt)
                 self.last_mode = (
                     self.gateway.last_trace.modes[-1]
                     if self.gateway.last_trace.modes
@@ -383,13 +431,16 @@ class StructuredOutputInvoker:
                 response = self.model.invoke(self._plain_prompt(prompt))
             result = self._validate(response)
             self.last_mode = self.last_mode or mode
-            self._record(prompt, response, mode, started)
+            if not gateway_attempts_recorded:
+                self._record(prompt, response, self.last_mode, started)
             return result
         except (OutputTruncatedError, OutputValidationError) as error:
-            self._record(prompt, response, mode, started, error=error)
+            if not gateway_attempts_recorded:
+                self._record(prompt, response, mode, started, error=error)
             raise
         except Exception as error:
-            self._record(prompt, response, mode, started, error=error)
+            if not gateway_attempts_recorded:
+                self._record(prompt, response, mode, started, error=error)
             raise classify_model_error(error) from error
 
     def _record(
@@ -414,10 +465,68 @@ class StructuredOutputInvoker:
                 repair=repair,
             )
 
+    def _record_gateway_attempts(self, prompt: Any, *, repair: bool = False) -> bool:
+        if self.gateway is None:
+            return False
+        attempts = self.gateway.last_trace.attempts
+        if self.usage_tracker is not None:
+            for attempt in attempts:
+                self.usage_tracker.record(
+                    operation=self.operation,
+                    mode=attempt.mode,
+                    prompt=prompt,
+                    schema=self.schema.model_json_schema(),
+                    response=attempt.response,
+                    elapsed_seconds=attempt.elapsed_seconds,
+                    error=attempt.error,
+                    repair=repair,
+                )
+            for recovery in self.gateway.last_trace.recoveries:
+                self.usage_tracker.record_recovery(
+                    operation=self.operation,
+                    mode=recovery.mode,
+                    action=recovery.decision.action,
+                    reason=recovery.decision.reason,
+                    request_id=recovery.failure.request_id,
+                    failure_category=recovery.failure.category,
+                )
+        return True
+
     def invoke(self, prompt: Any) -> T:
+        source = self._request_metadata_source
+        self._local.request_metadata = dict(source() if callable(source) else source)
         self._request_id = self.request_metadata.get("request_id") or uuid.uuid4().hex
+        retry_rejections: list[RejectedItem] = []
+        for validation_attempt in range(self.validation_retry_attempts + 1):
+            self._validation_attempt = validation_attempt
+            self._repair_attempt = 0
+            try:
+                result = self._invoke_once(prompt)
+            except OutputValidationError as error:
+                retry_rejections.extend(error.rejections)
+                can_retry = (
+                    validation_attempt < self.validation_retry_attempts
+                    and not (error.rejections and self.invalid_item_policy == "fail")
+                )
+                if can_retry:
+                    continue
+                if retry_rejections:
+                    error.rejections = self._persist_rejections(
+                        retry_rejections, "failed"
+                    )
+                raise
+            if retry_rejections:
+                self._persist_rejections(retry_rejections, "repaired")
+            return result
+        raise OutputValidationError("Structured output validation retries exhausted")
+
+    def _invoke_once(self, prompt: Any) -> T:
         modes: tuple[OutputMode, ...] = (
-            ("native", "tool", "text_json") if self.mode == "auto" else (self.mode,)
+            ("auto",)
+            if self.mode == "auto" and self.gateway is not None
+            else (
+                ("native", "tool", "text_json") if self.mode == "auto" else (self.mode,)
+            )
         )
         last_error: Exception | None = None
         for mode in modes:
@@ -430,79 +539,113 @@ class StructuredOutputInvoker:
                 raise
             except OutputValidationError as error:
                 last_error = error
-                invalid = error.raw_response or self._last_raw_text or str(error)
-                for _ in range(self.repair_attempts):
+                repair_rejections = list(error.rejections)
+                invalid = redact_sensitive_text(
+                    error.raw_response or self._last_raw_text or str(error)
+                )
+                repair_budget = (
+                    0
+                    if error.rejections and self.invalid_item_policy == "fail"
+                    else self.repair_attempts
+                )
+                for repair_attempt in range(1, repair_budget + 1):
+                    self._repair_attempt = repair_attempt
                     repair_prompt = self._plain_prompt(prompt, repair=invalid)
                     started = time.monotonic()
                     response = None
+                    repair_mode: OutputMode = (
+                        "auto" if self.gateway is not None else "text_json"
+                    )
+                    gateway_attempts_recorded = False
                     try:
                         if self.gateway is not None:
-                            response = self.gateway.invoke(
-                                GenerationRequest(
-                                    operation=f"{self.operation}.repair",
-                                    messages=_to_model_messages(repair_prompt),
-                                    output_schema=self.schema.model_json_schema(),
-                                    structured_output=True,
-                                    structured_output_mode="text_json",
-                                    request_id=self._request_id,
-                                    metadata={
-                                        **self.request_metadata,
-                                        "repair": "true",
-                                    },
+                            try:
+                                response = self.gateway.invoke(
+                                    GenerationRequest(
+                                        operation=f"{self.operation}.repair",
+                                        messages=_to_model_messages(repair_prompt),
+                                        output_schema=self.schema.model_json_schema(),
+                                        structured_output=True,
+                                        structured_output_mode=repair_mode,
+                                        request_id=self._request_id,
+                                        metadata={
+                                            **self.request_metadata,
+                                            "schema_name": self.schema.__name__,
+                                            "repair": "true",
+                                        },
+                                    )
                                 )
-                            )
+                            finally:
+                                gateway_attempts_recorded = (
+                                    self._record_gateway_attempts(
+                                        repair_prompt, repair=True
+                                    )
+                                )
                         else:
                             response = self.model.invoke(repair_prompt)
                         result = self._validate(response)
-                        self._record(
-                            repair_prompt,
-                            response,
-                            "text_json",
-                            started,
-                            repair=True,
+                        if repair_rejections:
+                            self._persist_rejections(repair_rejections, "repaired")
+                        if not gateway_attempts_recorded:
+                            self._record(
+                                repair_prompt,
+                                response,
+                                repair_mode,
+                                started,
+                                repair=True,
+                            )
+                        self.last_mode = (
+                            self.gateway.last_trace.modes[-1]
+                            if self.gateway is not None
+                            and self.gateway.last_trace.modes
+                            else repair_mode
                         )
-                        self.last_mode = "text_json"
                         return result
                     except OutputTruncatedError:
                         raise
                     except OutputValidationError as repair_error:
                         last_error = repair_error
-                        invalid = (
+                        repair_rejections.extend(repair_error.rejections)
+                        invalid = redact_sensitive_text(
                             repair_error.raw_response
                             or self._last_raw_text
                             or str(repair_error)
                         )
-                        self._record(
-                            repair_prompt,
-                            response,
-                            "text_json",
-                            started,
-                            error=repair_error,
-                            repair=True,
-                        )
+                        if not gateway_attempts_recorded:
+                            self._record(
+                                repair_prompt,
+                                response,
+                                repair_mode,
+                                started,
+                                error=repair_error,
+                                repair=True,
+                            )
                         continue
                     except Exception as repair_error:
                         classified = classify_model_error(repair_error)
-                        self._record(
-                            repair_prompt,
-                            response,
-                            "text_json",
-                            started,
-                            error=classified,
-                            repair=True,
-                        )
+                        if not gateway_attempts_recorded:
+                            self._record(
+                                repair_prompt,
+                                response,
+                                repair_mode,
+                                started,
+                                error=classified,
+                                repair=True,
+                            )
                         raise classified from repair_error
                 if isinstance(last_error, OutputValidationError):
-                    for rejection in last_error.rejections:
-                        failed = rejection.model_copy(update={"action": "failed"})
-                        if self.rejection_sink:
-                            self.rejection_sink(failed)
-                        if self.artifact_store:
-                            self.artifact_store.save_rejection(failed)
+                    last_error.rejections = _deduplicate_rejections(repair_rejections)
                 raise last_error
         if last_error is not None:
             raise last_error
         raise OutputValidationError("No structured output mode was attempted")
+
+
+def _deduplicate_rejections(rejections: list[RejectedItem]) -> list[RejectedItem]:
+    unique: dict[str, RejectedItem] = {}
+    for rejection in rejections:
+        unique[rejection.rejection_id] = rejection
+    return list(unique.values())
 
 
 def _to_model_messages(prompt: Any) -> list[ModelMessage]:

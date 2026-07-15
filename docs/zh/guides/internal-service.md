@@ -1265,7 +1265,7 @@ Worker 先在临时目录准备产物，再原子移动为 `artifacts/`，最后
 - `run-summary.json`：`run_id`、`status`、输入输出路径、目录/块/节点/边/社区数量、Profile 指纹、`extraction_brief` 的 ID/版本/content hash、质量摘要、模型用量和耗时。旧包没有 Brief 时该字段为 `null`。
 - `quality-report.json`：目录覆盖数、覆盖率、未覆盖 section ID、知识点数、关系数、关系类型分布、悬空边和 `passed`。
 - `performance-report.json`：`wall_elapsed_seconds`、`model_elapsed_seconds`、`chunks`、`max_workers`、`resumed`、请求统计、Token 统计、全局关系候选和接受率。
-- `cost-report.json`：`status=estimated|unpriced`、币种、输入/输出 Token、每百万 Token 单价和估算金额。未配置单价时金额为 `null`，HE 不猜测供应商价格。
+- `cost-report.json`：`status=estimated|partially_priced|unpriced`、币种、生成与 Embedding Token、各自每百万 Token 单价和估算金额。生成与 Embedding 独立计价；未配置的 Token 类别不会套用另一模型的价格，全部未配置时金额为 `null`。HE 不猜测供应商价格。
 - `model-usage.json`：累计模型调用成功/失败/修复次数、Token、耗时，以及按 operation/mode 聚合的统计。
 
 ## 8. 重试、超时与异常处理建议

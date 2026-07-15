@@ -90,6 +90,21 @@ def test_api_has_no_secrets_or_egress_and_worker_does(compose):
     assert compose["services"]["postgres"]["networks"] == ["database"]
     assert "service-api" in api["networks"]
     assert "service-api" not in worker["networks"]
+    for secret in ("OPENAI_API_KEY", "EMBEDDING_API_KEY", "ANTHROPIC_API_KEY"):
+        assert secret not in api["environment"]
+    for setting in (
+        "OPENAI_MODEL",
+        "OPENAI_BASE_URL",
+        "EMBEDDING_MODEL",
+        "EMBEDDING_BASE_URL",
+    ):
+        assert setting in api["environment"]
+
+
+def test_worker_persists_capability_probe_evidence_in_exchange(compose):
+    worker = compose["services"]["he-worker"]
+    assert worker["environment"]["HE_PROBE_ROOT"] == "/exchange/probes"
+    assert "exchange-data:/exchange" in worker["volumes"]
 
 
 def test_exchange_volume_has_stable_external_name(compose):
@@ -149,8 +164,15 @@ def test_env_example_lists_required_operator_variables():
         "PLATFORM",
         "HE_IMAGE",
         "MODEL_PROFILES_FILE",
+        "OPENAI_MODEL",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+        "EMBEDDING_MODEL",
+        "EMBEDDING_API_KEY",
+        "MINIMAX_API_KEY",
     ):
         assert key in text
+    assert "MIMIMAX_API_KEY" not in text
 
 
 def test_docker_readme_documents_exchange_and_safe_worker_limit():

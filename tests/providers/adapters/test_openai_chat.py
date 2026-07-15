@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperextract.providers.adapters.openai_chat import OpenAIChatAdapter
+from hyperextract.providers.adapters.base import GenerationAdapterError
 from hyperextract.providers.contracts import (
     GenerationRequest,
     ModelCapabilities,
@@ -103,3 +104,18 @@ def test_tool_arguments_become_final_json_text():
         )
     )
     assert response.final_text == '{"ok":true}'
+
+
+def test_missing_content_is_canonical_protocol_failure():
+    message = SimpleNamespace(
+        content=None,
+        refusal="blocked",
+        reasoning_content=None,
+        additional_kwargs={},
+    )
+
+    with pytest.raises(GenerationAdapterError) as error:
+        _adapter(FakeCompletions(_response(message))).invoke(_request())
+
+    assert error.value.failure.category == "protocol"
+    assert error.value.failure.reason == "content_filtered"

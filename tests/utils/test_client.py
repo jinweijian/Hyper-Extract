@@ -122,8 +122,11 @@ class TestCreateLLM:
         monkeypatch.setenv("OPENAI_BASE_URL", "https://route.example/v1")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-route")
         llm = create_llm()
+        from hyperextract.providers.langchain import AdapterChatModel
+
+        assert isinstance(llm, AdapterChatModel)
         assert llm.model_name == "route-model"
-        assert str(llm.openai_api_base).rstrip("/") == "https://route.example/v1"
+        assert llm.model_execution_gateway.adapter.base_url == "https://route.example/v1"
 
 
 class TestCreateEmbedder:
