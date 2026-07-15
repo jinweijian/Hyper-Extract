@@ -1,0 +1,36 @@
+{
+  "schema_name": "HyperExtractDocumentPackage",
+  "schema_version": "1.1",
+  "document": {
+    "id": "shared-fingerprint-fixture",
+    "title": "共享指纹契约样例",
+    "language": "zh-CN",
+    "source": {
+      "path": "fixture.pdf",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  "producer": {
+    "name": "cross-repository-contract-fixture",
+    "version": "1.0.0"
+  },
+  "outline_path": "outline.json",
+  "provenance_path": "provenance.jsonl",
+  "extraction_brief": {
+    "path": "extraction-brief.yaml",
+    "sha256": "86649c7fd8abd9934b3ca6877acaa7dea67fc85c9971638343a7e777b870c58c",
+    "bytes": 205
+  },
+  "contents": [
+    {
+      "id": "content-000001",
+      "path": "content/chapter-1.md",
+      "order": 0,
+      "content_kind": "body",
+      "outline_id": "outline-root",
+      "sha256": "a3de473b00c3e71ee48f66cfdffae1ebc11ffbc5bf6cef76842e9b61e58189df",
+      "bytes": 34,
+      "extract": true
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+schema_name: HyperExtractExtractionBrief
+schema_version: "1.0"
+metadata:
+  id: shared-fingerprint-fixture
+  version: "1.0"
+task:
+  objective: 抽取有原文证据的知识点
+domain:
+  name: 项目管理

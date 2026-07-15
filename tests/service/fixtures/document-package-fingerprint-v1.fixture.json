@@ -1,0 +1,7 @@
+{
+  "schema_name": "HyperExtractDocumentPackageFingerprintFixture",
+  "schema_version": "1.0",
+  "document_package_version": "1.1",
+  "algorithm": "sha256-canonical-json",
+  "fingerprint": "3a61a6d6785f0c88cfd14420625fa2988757a09364053d516be39c86f053258c"
+}
