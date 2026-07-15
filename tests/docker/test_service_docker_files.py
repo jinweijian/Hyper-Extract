@@ -10,8 +10,24 @@ import re
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_docker_layout_uses_compose_conf_and_image_directories():
+    assert (ROOT / "docker/compose.yml").is_file()
+    assert (ROOT / "docker/compose.dev.yml").is_file()
+    assert (ROOT / "docker/conf/model-profiles.example.toml").is_file()
+    assert (ROOT / "docker/image/Dockerfile").is_file()
+    assert (ROOT / "docker/image/entrypoint.sh").is_file()
+    for old_path in (
+        "docker/service.compose.yml",
+        "docker/service.compose.dev.yml",
+        "docker/service.Dockerfile",
+        "docker/entrypoint.sh",
+        "docker/model-profiles.example.toml",
+    ):
+        assert not (ROOT / old_path).exists()
+
+
 def test_image_is_lockfile_based_and_non_root():
-    text = (ROOT / "docker/service.Dockerfile").read_text()
+    text = (ROOT / "docker/image/Dockerfile").read_text()
     assert "ghcr.io/astral-sh/uv:" in text
     assert "uv sync --frozen" in text
     assert "USER 10001:10001" in text
@@ -23,7 +39,7 @@ def test_image_is_lockfile_based_and_non_root():
 
 
 def test_entrypoint_sets_group_writable_umask():
-    text = (ROOT / "docker/entrypoint.sh").read_text()
+    text = (ROOT / "docker/image/entrypoint.sh").read_text()
     assert "umask 0002" in text
     assert text.index("umask 0002") < text.rindex('exec "$@"')
 
@@ -135,7 +151,7 @@ def test_api_and_worker_share_the_same_profile_mount(compose):
     expected_env = "/run/config/model-profiles.toml"
     assert api["environment"]["HE_SERVICE_MODEL_PROFILES"] == expected_env
     assert worker["environment"]["HE_SERVICE_MODEL_PROFILES"] == expected_env
-    expected_mount = "${MODEL_PROFILES_FILE:-./model-profiles.example.toml}:/run/config/model-profiles.toml:ro"
+    expected_mount = "${MODEL_PROFILES_FILE:-./conf/model-profiles.example.toml}:/run/config/model-profiles.toml:ro"
     assert expected_mount in api["volumes"]
     assert expected_mount in worker["volumes"]
 
@@ -177,11 +193,23 @@ def test_env_example_lists_required_operator_variables():
     assert "MIMIMAX_API_KEY" not in text
 
 
-def test_docker_readme_documents_exchange_and_safe_worker_limit():
+def test_docker_readme_is_chinese_and_documents_configuration_boundaries():
     text = (ROOT / "docker" / "README.md").read_text()
-    assert "/exchange" in text
-    assert "10001" in text
-    assert "do not use Compose `--scale`" in text
+    for required in (
+        "# Docker 部署",
+        "docker/compose.yml",
+        "docker/compose.dev.yml",
+        "MINIMAX_API_KEY",
+        "model-profiles.example.toml",
+        "只有 Worker",
+        "/exchange",
+        "10001",
+        "不要使用 Compose `--scale`",
+    ):
+        assert required in text
+    assert "service.compose" not in text
+    assert "service.Dockerfile" not in text
+    assert "MIMIMAX_API_KEY" not in text
 
 
 def test_smoke_script_is_isolated_and_cleans_up():
@@ -194,6 +222,10 @@ def test_smoke_script_is_isolated_and_cleans_up():
     assert "before_worker_id" in text
     assert "after_worker_id" in text
     assert 'after_worker_id" != "$before_worker_id' in text
+    assert "docker/compose.yml" in text
+    assert "docker/compose.dev.yml" in text
+    assert "./conf/model-profiles.example.toml" in text
+    assert "service.compose" not in text
 
 
 def test_api_uses_readiness_and_worker_has_shutdown_window(compose):

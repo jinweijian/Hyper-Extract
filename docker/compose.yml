@@ -20,7 +20,7 @@ services:
     platform: ${PLATFORM:-linux/amd64}
     build:
       context: ..
-      dockerfile: docker/service.Dockerfile
+      dockerfile: docker/image/Dockerfile
     command: ["alembic", "upgrade", "head"]
     restart: "no"
     environment:
@@ -35,7 +35,7 @@ services:
     platform: ${PLATFORM:-linux/amd64}
     build:
       context: ..
-      dockerfile: docker/service.Dockerfile
+      dockerfile: docker/image/Dockerfile
     command: ["he-api"]
     restart: unless-stopped
     stop_grace_period: 20s
@@ -43,13 +43,18 @@ services:
       HE_SERVICE_DATABASE_URL: postgresql+psycopg://hyperextract:${POSTGRES_PASSWORD}@postgres/hyperextract
       HE_SERVICE_EXCHANGE_ROOT: /exchange
       HE_SERVICE_MODEL_PROFILES: /run/config/model-profiles.toml
+      HE_SERVICE_MAX_UPLOAD_BYTES: ${HE_SERVICE_MAX_UPLOAD_BYTES:-500000000}
+      HE_SERVICE_MAX_EXPANDED_BYTES: ${HE_SERVICE_MAX_EXPANDED_BYTES:-2147483648}
+      HE_SERVICE_MAX_ARCHIVE_MEMBERS: ${HE_SERVICE_MAX_ARCHIVE_MEMBERS:-20000}
+      HE_SERVICE_UPLOAD_READ_BLOCK: ${HE_SERVICE_UPLOAD_READ_BLOCK:-1048576}
+      HE_SERVICE_PROGRESS_SECONDS: ${HE_SERVICE_PROGRESS_SECONDS:-5}
       OPENAI_MODEL: ${OPENAI_MODEL:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
       EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
     volumes:
       - exchange-data:/exchange
-      - ${MODEL_PROFILES_FILE:-./model-profiles.example.toml}:/run/config/model-profiles.toml:ro
+      - ${MODEL_PROFILES_FILE:-./conf/model-profiles.example.toml}:/run/config/model-profiles.toml:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -68,7 +73,7 @@ services:
     platform: ${PLATFORM:-linux/amd64}
     build:
       context: ..
-      dockerfile: docker/service.Dockerfile
+      dockerfile: docker/image/Dockerfile
     command: ["he-worker"]
     restart: unless-stopped
     stop_grace_period: 90s
@@ -79,10 +84,12 @@ services:
       HE_SERVICE_DATABASE_URL: postgresql+psycopg://hyperextract:${POSTGRES_PASSWORD}@postgres/hyperextract
       HE_SERVICE_EXCHANGE_ROOT: /exchange
       HE_SERVICE_MODEL_PROFILES: /run/config/model-profiles.toml
+      HE_SERVICE_PROGRESS_SECONDS: ${HE_SERVICE_PROGRESS_SECONDS:-5}
+      HE_SERVICE_PIPELINE_MAX_WORKERS: ${HE_SERVICE_PIPELINE_MAX_WORKERS:-2}
       HE_PROBE_ROOT: /exchange/probes
     volumes:
       - exchange-data:/exchange
-      - ${MODEL_PROFILES_FILE:-./model-profiles.example.toml}:/run/config/model-profiles.toml:ro
+      - ${MODEL_PROFILES_FILE:-./conf/model-profiles.example.toml}:/run/config/model-profiles.toml:ro
     depends_on:
       postgres:
         condition: service_healthy

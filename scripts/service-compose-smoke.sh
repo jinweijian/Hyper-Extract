@@ -21,7 +21,7 @@ export API_NETWORK_NAME="$SMOKE_ID-api"
 export POSTGRES_PASSWORD="smoke-not-secret"
 export HE_API_PORT="$((18000 + ($$ % 1000)))"
 export PLATFORM="${PLATFORM:-linux/amd64}"
-export MODEL_PROFILES_FILE="./model-profiles.example.toml"
+export MODEL_PROFILES_FILE="./conf/model-profiles.example.toml"
 export HE_IMAGE="$SMOKE_ID-service:dev"
 
 # No provider keys: the smoke must not reach any model endpoint.
@@ -33,7 +33,7 @@ export ANTHROPIC_API_KEY=""
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-COMPOSE_FILES="-f docker/service.compose.yml -f docker/service.compose.dev.yml"
+COMPOSE_FILES="-f docker/compose.yml -f docker/compose.dev.yml"
 COMPOSE="docker compose --project-name $PROJECT_NAME --env-file docker/.env.example $COMPOSE_FILES"
 
 cleanup() {

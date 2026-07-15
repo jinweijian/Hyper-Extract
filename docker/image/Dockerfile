@@ -47,7 +47,7 @@ COPY --from=builder --chown=10001:10001 /app /app
 # Install the entrypoint and ensure /exchange exists and is owned by 10001.
 # The entrypoint only validates readability — it does NOT chown at runtime
 # and does NOT run database migrations.
-COPY docker/entrypoint.sh /usr/local/bin/he-entrypoint
+COPY docker/image/entrypoint.sh /usr/local/bin/he-entrypoint
 RUN chmod +x /usr/local/bin/he-entrypoint && \
     mkdir -p /exchange && chown 10001:10001 /exchange
 

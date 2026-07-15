@@ -10,17 +10,17 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-COMPOSE_PATH = ROOT / "docker" / "service.compose.yml"
-DEV_COMPOSE_PATH = ROOT / "docker" / "service.compose.dev.yml"
+COMPOSE_PATH = ROOT / "docker" / "compose.yml"
+DEV_COMPOSE_PATH = ROOT / "docker" / "compose.dev.yml"
 
 
 @pytest.fixture(scope="module")
 def compose() -> dict:
-    """Parse ``docker/service.compose.yml`` into a plain dict."""
+    """Parse ``docker/compose.yml`` into a plain dict."""
     return yaml.safe_load(COMPOSE_PATH.read_text())
 
 
 @pytest.fixture(scope="module")
 def dev_compose() -> dict:
-    """Parse ``docker/service.compose.dev.yml`` into a plain dict."""
+    """Parse ``docker/compose.dev.yml`` into a plain dict."""
     return yaml.safe_load(DEV_COMPOSE_PATH.read_text())
