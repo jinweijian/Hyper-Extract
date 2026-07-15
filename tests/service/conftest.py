@@ -1,5 +1,8 @@
 import hashlib
+import io
 import json
+import tarfile
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,6 +12,37 @@ from hyperextract.documents import document_package_fingerprint
 
 def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def build_package_archive(package_dir):
+    """Return (archive_bytes, package_fingerprint, transport_sha256).
+
+    The archive root directly contains the Document Package files (no nested
+    top-level directory), matching the transport contract.
+    """
+    fingerprint = document_package_fingerprint(package_dir)
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for path in sorted(Path(package_dir).rglob("*")):
+            if path.is_file():
+                tar.add(path, arcname=str(path.relative_to(package_dir)))
+    archive = buffer.getvalue()
+    transport = hashlib.sha256(archive).hexdigest()
+    return archive, fingerprint, transport
+
+
+def multipart_create_payload(package_dir, *, options=None, contract_version="1.1"):
+    """Build (data, files) for a multipart POST /v1/runs request."""
+    archive, fingerprint, transport = build_package_archive(package_dir)
+    data = {
+        "contract_version": contract_version,
+        "package_fingerprint": fingerprint,
+        "transport_sha256": transport,
+    }
+    if options is not None:
+        data["options"] = json.dumps(options)
+    files = {"package": ("course.hepkg.tar.gz", archive, "application/gzip")}
+    return data, files
 
 
 @pytest.fixture
@@ -123,7 +157,8 @@ def running_run(repository):
         run_id="run_running",
         request_fingerprint="a" * 64,
         request_json={"input": {}},
-        output_uri="file:///exchange/runs/run_running/",
+        output_uri="/v1/runs/run_running",
+        resolved_package_fingerprint="b" * 64,
     )
     repository.create_or_get(command, "running-key")
     return repository.claim_next("worker-1", lease_seconds=120)
@@ -138,7 +173,8 @@ def cancellable_run(repository):
         run_id="run_cancellable",
         request_fingerprint="c" * 64,
         request_json={"input": {}},
-        output_uri="file:///exchange/runs/run_cancellable/",
+        output_uri="/v1/runs/run_cancellable",
+        resolved_package_fingerprint="b" * 64,
     )
     repository.create_or_get(command, "cancellable-key")
     return repository.claim_next("worker-1", lease_seconds=120)
@@ -156,7 +192,8 @@ def expired_running_run(repository):
         run_id="run_expired",
         request_fingerprint="e" * 64,
         request_json={"input": {}},
-        output_uri="file:///exchange/runs/run_expired/",
+        output_uri="/v1/runs/run_expired",
+        resolved_package_fingerprint="b" * 64,
     )
     repository.create_or_get(command, "expired-key")
     repository.claim_next("worker-1", lease_seconds=120)
@@ -192,7 +229,7 @@ def worker(repository, settings):
 
 
 @pytest.fixture
-def failed_run(repository, package_path, settings):
+def failed_run(repository, package_v1_1, settings):
     """Create a run through the API then mark it failed with attempt history."""
     from fastapi.testclient import TestClient
 
@@ -200,6 +237,10 @@ def failed_run(repository, package_path, settings):
     from hyperextract.service.runtime import create_runtime
 
     class FakeProfiles:
+        def validate(self, name, *, require_secrets=False, require_embedder=False, check_probe=False):
+            if name != "openai-compatible-default":
+                raise KeyError(name)
+
         def public_descriptor(self, name):
             if name != "openai-compatible-default":
                 raise KeyError(name)
@@ -211,22 +252,9 @@ def failed_run(repository, package_path, settings):
         model_profiles=FakeProfiles(),
     )
     with TestClient(create_app(runtime=runtime)) as api_client:
-        payload = {
-            "input": {
-                "type": "document_package",
-                "contract_version": "1.0",
-                "package_uri": package_path.as_uri(),
-                "package_format": "directory",
-                "sha256": document_package_fingerprint(package_path),
-            },
-            "pipeline": {
-                "name": "course_graph",
-                "profile": {"name": "course_knowledge_graph", "version": "1"},
-            },
-            "execution": {"model_profile": "openai-compatible-default"},
-        }
+        data, files = multipart_create_payload(package_v1_1, contract_version="1.1")
         response = api_client.post(
-            "/v1/runs", headers={"Idempotency-Key": "failed"}, json=payload
+            "/v1/runs", headers={"Idempotency-Key": "failed"}, data=data, files=files
         )
         run_id = response.json()["run_id"]
         repository.fail(
@@ -247,6 +275,10 @@ def client(settings, repository):
     from hyperextract.service.runtime import create_runtime
 
     class FakeProfiles:
+        def validate(self, name, *, require_secrets=False, require_embedder=False, check_probe=False):
+            if name != "openai-compatible-default":
+                raise KeyError(name)
+
         def public_descriptor(self, name):
             if name != "openai-compatible-default":
                 raise KeyError(name)

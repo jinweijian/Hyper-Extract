@@ -45,6 +45,7 @@ class RunRecord:
     lease_expires_at: datetime | None
     recovery_count: int
     resume_from_checkpoint: bool
+    updated_at: datetime
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,7 @@ def _record(row: RunEntity) -> RunRecord:
         lease_expires_at=row.lease_expires_at,
         recovery_count=row.recovery_count,
         resume_from_checkpoint=row.resume_from_checkpoint,
+        updated_at=row.updated_at,
     )
 
 

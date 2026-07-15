@@ -13,6 +13,7 @@ from .artifacts import ArtifactPublisher
 from .errors import normalize_failure
 from .repository import LeaseOwnershipLost
 from .settings import ServiceSettings
+from . import timeline
 
 _WORKER_VERSION = "1.0.0"
 
@@ -116,6 +117,24 @@ class ServiceWorker:
             if published_manifest is not None:
                 if lease_lost.is_set():
                     return True
+                publishing_record = self.repository.update_progress(
+                    record.run_id,
+                    self.worker_id,
+                    stage="publish",
+                    progress={},
+                )
+                self._transition_timeline(
+                    publishing_record,
+                    activity="ARTIFACT_PUBLISHING",
+                    status="started",
+                    message="正在核对已发布的知识图谱结果",
+                )
+                self._transition_timeline(
+                    publishing_record,
+                    activity="ARTIFACT_PUBLISHING",
+                    status="completed",
+                    message="知识图谱结果发布完成",
+                )
                 self.repository.complete(
                     record.run_id,
                     self.worker_id,
@@ -135,7 +154,15 @@ class ServiceWorker:
             # has already taken over — do NOT call mark_cancelled or publish.
             if not lease_lost.is_set():
                 try:
-                    self.repository.mark_cancelled(record.run_id, self.worker_id)
+                    cancelled = self.repository.mark_cancelled(
+                        record.run_id, self.worker_id
+                    )
+                    self._transition_timeline(
+                        cancelled,
+                        activity=None,
+                        status="failed",
+                        message="任务已取消",
+                    )
                 except LeaseOwnershipLost:
                     lease_lost.set()
             return True
@@ -147,14 +174,39 @@ class ServiceWorker:
             if lease_lost.is_set():
                 return True
             try:
+                publishing_record = self.repository.update_progress(
+                    record.run_id,
+                    self.worker_id,
+                    stage="publish",
+                    progress={},
+                )
+                self._transition_timeline(
+                    publishing_record,
+                    activity="ARTIFACT_PUBLISHING",
+                    status="started",
+                    message="正在发布知识图谱结果",
+                )
+
+                def publish_and_close_timeline():
+                    result = self.publisher.publish(record, summary)
+                    self._transition_timeline(
+                        publishing_record,
+                        activity="ARTIFACT_PUBLISHING",
+                        status="completed",
+                        message="知识图谱结果发布完成",
+                    )
+                    return result
+
                 self.repository.complete(
                     record.run_id,
                     self.worker_id,
                     summary,
-                    before_complete=lambda: self.publisher.publish(record, summary),
+                    before_complete=publish_and_close_timeline,
                 )
             except LeaseOwnershipLost:
                 lease_lost.set()
+            except Exception as error:
+                self._handle_failure(record.run_id, error, lease_lost)
             return True
         finally:
             lease_lost.set()  # signal the heartbeat thread to stop
@@ -179,7 +231,7 @@ class ServiceWorker:
         record = self.repository.get(run_id)
         attempt = record.attempt if record is not None else 1
         try:
-            self.repository.fail(
+            failed_record = self.repository.fail(
                 run_id,
                 worker_id=self.worker_id,
                 code=code,
@@ -193,6 +245,12 @@ class ServiceWorker:
         except LeaseOwnershipLost:
             lease_lost.set()
             return
+        self._transition_timeline(
+            failed_record,
+            activity=timeline.PIPELINE_STAGE_ACTIVITY.get(record.stage),
+            status="failed",
+            message=public_message,
+        )
         try:
             self.publisher.save_attempt_diagnostics(
                 run_id,
@@ -203,6 +261,45 @@ class ServiceWorker:
         except OSError:
             # Diagnostics are best-effort — never fail the run twice
             # because the diagnostics file could not be written.
+            pass
+
+    def _transition_timeline(
+        self,
+        record,
+        *,
+        activity: str | None,
+        status: str,
+        message: str,
+    ) -> None:
+        """Best-effort owner/attempt-scoped lifecycle update.
+
+        A stale worker may still write an older attempt after lease loss, but
+        the status API rejects that envelope and a new attempt rewrites it.
+        The database ownership check always happens before publish starts.
+        """
+        path = self.settings.run_root / record.run_id / "state" / "timeline.json"
+        state = timeline.read_timeline(path)
+        if not timeline.is_valid_for_run(
+            state,
+            run_id=record.run_id,
+            attempt=record.attempt,
+        ):
+            state = timeline.prepare_timeline(
+                state,
+                run_id=record.run_id,
+                worker_id=self.worker_id,
+                attempt=record.attempt,
+            )
+        state = timeline.transition(
+            state,
+            activity=activity,
+            status=status,
+            message=message,
+        )
+        try:
+            timeline.write_timeline(path, state)
+        except OSError:
+            # Timeline is presentation state and never fails the run.
             pass
 
     def _execute(self, record, lease_lost):

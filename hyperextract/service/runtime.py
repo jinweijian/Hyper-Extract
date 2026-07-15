@@ -18,8 +18,12 @@ class ServiceRuntime:
     owned_engine: Engine | None = None
 
     def prepare(self) -> None:
-        self.settings.package_root.mkdir(parents=True, exist_ok=True)
-        self.settings.run_root.mkdir(parents=True, exist_ok=True)
+        for root in (
+            self.settings.upload_root,
+            self.settings.package_root,
+            self.settings.run_root,
+        ):
+            root.mkdir(parents=True, exist_ok=True)
 
     def close(self) -> None:
         if self.owned_engine is not None:

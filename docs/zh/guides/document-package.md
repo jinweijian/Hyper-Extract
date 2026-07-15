@@ -2,6 +2,8 @@
 
 Document Package 是解析器与 Hyper-Extract 之间的稳定协议。解析器可以是本地 Docling、独立部署的 Docling API 或其他文档服务；HE 不启动、安装或调用这些解析器。
 
+Document Package **目录**是内容契约。跨服务传输时，调用方将其打包为 `.hepkg.tar.gz` 归档，归档根目录必须**直接**包含 `manifest.json`、`outline.json`、`provenance.jsonl`、`extraction-brief.yaml` 和 `content/`，不得额外嵌套顶层目录。两个哈希分别适用：`package_fingerprint`（解压后 Package 的规范 SHA-256）与 `transport_sha256`（tarball 字节流 SHA-256），两者独立校验，不可互替。
+
 ## 目录结构
 
 ```text

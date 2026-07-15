@@ -513,7 +513,7 @@ def _extract_chunk(
                 )
                 checkpoint.emit(
                     "local_extract",
-                    "completed",
+                    "progress",
                     f"{chunk.id} 联合抽取完成：{len(combined.nodes)} 节点 / {len(combined.edges)} 关系",
                     chunk_id=chunk.id,
                 )
@@ -554,7 +554,7 @@ def _extract_chunk(
             )
             checkpoint.emit(
                 "local_extract",
-                "completed",
+                "progress",
                 f"{chunk.id} 节点抽取完成：{len(nodes)} 个",
                 chunk_id=chunk.id,
             )
@@ -606,7 +606,7 @@ def _extract_chunk(
             )
             checkpoint.emit(
                 "local_extract",
-                "completed",
+                "progress",
                 f"{chunk.id} 关系抽取完成：{len(edges)} 条",
                 chunk_id=chunk.id,
             )
@@ -1548,6 +1548,7 @@ def run_course_document(
 
         checkpoint.update(stage="chunk_plan")
         _check_cancel(control)
+        checkpoint.emit("chunk_plan", "started", "规划章节感知内容块")
         chunks = plan_document_chunks(
             outline,
             blocks,
@@ -1562,6 +1563,13 @@ def run_course_document(
         )
 
         checkpoint.update(stage="local_extract")
+        checkpoint.emit(
+            "local_extract",
+            "started",
+            f"开始分析 {len(chunks)} 个内容块",
+            current=0,
+            total=len(chunks),
+        )
         graphs: list[dict[str, Any]] = []
         known_terms: list[str] = []
         for batch_start in range(0, len(chunks), max(1, options.max_workers)):
@@ -1639,7 +1647,7 @@ def run_course_document(
                         completed[chunk.index] = graph
                         checkpoint.emit(
                             "local_extract",
-                            "completed",
+                            "progress",
                             f"{chunk.id}：{len(graph['nodes'])} 节点 / {len(graph['edges'])} 局部关系",
                             chunk_id=chunk.id,
                             current=chunk.index + 1,
@@ -1651,9 +1659,17 @@ def run_course_document(
                         known_terms.extend(
                             node.get("name", "") for node in graph.get("nodes", [])
                         )
+        checkpoint.emit(
+            "local_extract",
+            "completed",
+            f"完成 {len(chunks)} 个内容块的知识抽取",
+            current=len(chunks),
+            total=len(chunks),
+        )
 
         checkpoint.update(stage="deduplicate")
         _check_cancel(control)
+        checkpoint.emit("deduplicate", "started", "开始合并重复知识点和关系")
         dedup_path = checkpoint.root / "stages" / "deduplicate.json"
         cached_dedup = (
             RunCheckpoint.read_json(dedup_path) if resume and not force else None
@@ -1695,6 +1711,7 @@ def run_course_document(
 
         checkpoint.update(stage="global_edges")
         _check_cancel(control)
+        checkpoint.emit("global_edges", "started", "开始建立跨章节知识关系")
         global_path = checkpoint.root / "stages" / "global_edges.json"
         cached_global = (
             RunCheckpoint.read_json(global_path) if resume and not force else None
@@ -1734,6 +1751,7 @@ def run_course_document(
 
         checkpoint.update(stage="quality")
         _check_cancel(control)
+        checkpoint.emit("quality", "started", "开始检查知识图谱完整性")
         expected_outline_ids = {
             outline_id
             for chunk in chunks
@@ -1769,6 +1787,7 @@ def run_course_document(
 
         checkpoint.update(stage="communities")
         _check_cancel(control)
+        checkpoint.emit("communities", "started", "开始组织知识主题群组")
         community_path = checkpoint.root / "stages" / "communities.json"
         cached_communities = (
             RunCheckpoint.read_json(community_path) if resume and not force else None
@@ -1850,6 +1869,7 @@ def run_course_document(
 
         checkpoint.update(stage="finalize")
         _check_cancel(control)
+        checkpoint.emit("finalize", "started", "开始整理最终知识图谱")
         if options.build_index:
             ka.build_index()
         ka.dump(output)
@@ -1956,6 +1976,7 @@ def run_course_document(
         checkpoint.update(status="interrupted", summary=summary)
         raise
     except Exception as error:
+        failed_stage = str(checkpoint.manifest.get("stage") or "run")
         summary = {
             "run_id": checkpoint.run_id,
             "status": "failed",
@@ -1965,6 +1986,17 @@ def run_course_document(
         }
         atomic_write_json(output / "run-summary.json", summary)
         checkpoint.update(status="failed", summary=summary)
+        if failed_stage in {
+            "ingest",
+            "chunk_plan",
+            "local_extract",
+            "deduplicate",
+            "global_edges",
+            "quality",
+            "communities",
+            "finalize",
+        }:
+            checkpoint.emit(failed_stage, "failed", "当前处理阶段执行失败")
         checkpoint.emit("run", "failed", summary["error"])
         raise
     finally:

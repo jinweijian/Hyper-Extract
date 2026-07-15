@@ -1,0 +1,467 @@
+{
+  "schema_name": "HyperExtractTimelineContractFixtures",
+  "schema_version": "1.0",
+  "cases": {
+    "running": {
+      "timeline_schema_version": "1.0",
+      "attempt": 1,
+      "activity": "EXTRACTING_CHUNK",
+      "message": "正在分析第 8/28 个内容块",
+      "message_seq": 37,
+      "progress": {
+        "current": 8,
+        "total": 28,
+        "percent": 28.57
+      },
+      "timeline": [
+        {
+          "activity": "DOCUMENT_INGESTING",
+          "label": "读取文档内容",
+          "status": "completed",
+          "message": "读取文档内容完成",
+          "message_seq": 2,
+          "progress": null,
+          "started_at": "2026-07-15T00:00:00Z",
+          "completed_at": "2026-07-15T00:00:30Z",
+          "attempt": 1
+        },
+        {
+          "activity": "CHUNK_PLANNING",
+          "label": "规划处理单元",
+          "status": "completed",
+          "message": "规划处理单元完成",
+          "message_seq": 2,
+          "progress": null,
+          "started_at": "2026-07-15T00:01:00Z",
+          "completed_at": "2026-07-15T00:01:30Z",
+          "attempt": 1
+        },
+        {
+          "activity": "EXTRACTING_CHUNK",
+          "label": "抽取知识点",
+          "status": "running",
+          "message": "正在分析第 8/28 个内容块",
+          "message_seq": 37,
+          "progress": {
+            "current": 8,
+            "total": 28,
+            "percent": 28.57
+          },
+          "started_at": "2026-07-15T00:02:00Z",
+          "completed_at": null,
+          "attempt": 1
+        },
+        {
+          "activity": "DEDUPLICATING",
+          "label": "消除重复知识点",
+          "status": "pending",
+          "message": "",
+          "message_seq": 0,
+          "progress": null,
+          "started_at": null,
+          "completed_at": null,
+          "attempt": null
+        },
+        {
+          "activity": "BUILDING_GLOBAL_EDGES",
+          "label": "建立跨章节关系",
+          "status": "pending",
+          "message": "",
+          "message_seq": 0,
+          "progress": null,
+          "started_at": null,
+          "completed_at": null,
+          "attempt": null
+        },
+        {
+          "activity": "QUALITY_CHECKING",
+          "label": "检查图谱质量",
+          "status": "pending",
+          "message": "",
+          "message_seq": 0,
+          "progress": null,
+          "started_at": null,
+          "completed_at": null,
+          "attempt": null
+        },
+        {
+          "activity": "BUILDING_COMMUNITIES",
+          "label": "组织知识主题",
+          "status": "pending",
+          "message": "",
+          "message_seq": 0,
+          "progress": null,
+          "started_at": null,
+          "completed_at": null,
+          "attempt": null
+        },
+        {
+          "activity": "FINALIZING",
+          "label": "整理最终图谱",
+          "status": "pending",
+          "message": "",
+          "message_seq": 0,
+          "progress": null,
+          "started_at": null,
+          "completed_at": null,
+          "attempt": null
+        },
+        {
+          "activity": "ARTIFACT_PUBLISHING",
+          "label": "发布图谱产物",
+          "status": "pending",
+          "message": "",
+          "message_seq": 0,
+          "progress": null,
+          "started_at": null,
+          "completed_at": null,
+          "attempt": null
+        }
+      ]
+    },
+    "completed": {
+      "timeline_schema_version": "1.0",
+      "attempt": 1,
+      "activity": "ARTIFACT_PUBLISHING",
+      "message": "发布图谱产物完成",
+      "message_seq": 2,
+      "progress": null,
+      "timeline": [
+        {
+          "activity": "DOCUMENT_INGESTING",
+          "label": "读取文档内容",
+          "status": "completed",
+          "message": "读取文档内容完成",
+          "message_seq": 2,
+          "progress": null,
+          "started_at": "2026-07-15T00:00:00Z",
+          "completed_at": "2026-07-15T00:00:30Z",
+          "attempt": 1
+        },
+        {
+          "activity": "CHUNK_PLANNING",
+          "label": "规划处理单元",
+          "status": "completed",
+          "message": "规划处理单元完成",
+          "message_seq": 2,
+          "progress": null,
+          "started_at": "2026-07-15T00:01:00Z",
+          "completed_at": "2026-07-15T00:01:30Z",
+          "attempt": 1
+        },
+        {
+          "activity": "EXTRACTING_CHUNK",
+          "label": "抽取知识点",
+          "status": "completed",
+          "message": "抽取知识点完成",
+          "message_seq": 2,
+          "progress": null,
+          "started_at": "2026-07-15T00:02:00Z",
+          "completed_at": "2026-07-15T00:02:30Z",
+          "attempt": 1
+        },
+        {
+          "activity": "DEDUPLICATING",
+          "label": "消除重复知识点",
+          "status": "completed",
+          "message": "消除重复知识点完成",
+          "message_seq": 2,
+          "progress": null,
+          "started_at": "2026-07-15T00:03:00Z",
+          "completed_at": "2026-07-15T00:03:30Z",
+          "attempt": 1
+        },
+        {
+          "activity": "BUILDING_GLOBAL_EDGES",
+          "label": "建立跨章节关系",
+          "status": "completed",
+          "message": "建立跨章节关系完成",
+          "message_seq": 2,
+          "progress": null,
+          "started_at": "2026-07-15T00:04:00Z",
+          "completed_at": "2026-07-15T00:04:30Z",
+          "attempt": 1
+        },
+        {
+          "activity": "QUALITY_CHECKING",
+          "label": "检查图谱质量",
+          "status": "completed",
+          "message": "检查图谱质量完成",
+          "message_seq": 2,
+          "progress": null,
+          "started_at": "2026-07-15T00:05:00Z",
+          "completed_at": "2026-07-15T00:05:30Z",
+          "attempt": 1
+        },
+        {
+          "activity": "BUILDING_COMMUNITIES",
+          "label": "组织知识主题",
+          "status": "completed",
+          "message": "组织知识主题完成",
+          "message_seq": 2,
+          "progress": null,
+          "started_at": "2026-07-15T00:06:00Z",
+          "completed_at": "2026-07-15T00:06:30Z",
+          "attempt": 1
+        },
+        {
+          "activity": "FINALIZING",
+          "label": "整理最终图谱",
+          "status": "completed",
+          "message": "整理最终图谱完成",
+          "message_seq": 2,
+          "progress": null,
+          "started_at": "2026-07-15T00:07:00Z",
+          "completed_at": "2026-07-15T00:07:30Z",
+          "attempt": 1
+        },
+        {
+          "activity": "ARTIFACT_PUBLISHING",
+          "label": "发布图谱产物",
+          "status": "completed",
+          "message": "发布图谱产物完成",
+          "message_seq": 2,
+          "progress": null,
+          "started_at": "2026-07-15T00:08:00Z",
+          "completed_at": "2026-07-15T00:08:30Z",
+          "attempt": 1
+        }
+      ]
+    },
+    "failed": {
+      "timeline_schema_version": "1.0",
+      "attempt": 1,
+      "activity": "EXTRACTING_CHUNK",
+      "message": "模型请求重试次数已耗尽",
+      "message_seq": 12,
+      "progress": {
+        "current": 3,
+        "total": 28,
+        "percent": 10.71
+      },
+      "timeline": [
+        {
+          "activity": "DOCUMENT_INGESTING",
+          "label": "读取文档内容",
+          "status": "completed",
+          "message": "读取文档内容完成",
+          "message_seq": 2,
+          "progress": null,
+          "started_at": "2026-07-15T00:00:00Z",
+          "completed_at": "2026-07-15T00:00:30Z",
+          "attempt": 1
+        },
+        {
+          "activity": "CHUNK_PLANNING",
+          "label": "规划处理单元",
+          "status": "completed",
+          "message": "规划处理单元完成",
+          "message_seq": 2,
+          "progress": null,
+          "started_at": "2026-07-15T00:01:00Z",
+          "completed_at": "2026-07-15T00:01:30Z",
+          "attempt": 1
+        },
+        {
+          "activity": "EXTRACTING_CHUNK",
+          "label": "抽取知识点",
+          "status": "failed",
+          "message": "模型请求重试次数已耗尽",
+          "message_seq": 12,
+          "progress": {
+            "current": 3,
+            "total": 28,
+            "percent": 10.71
+          },
+          "started_at": "2026-07-15T00:02:00Z",
+          "completed_at": "2026-07-15T00:03:00Z",
+          "attempt": 1
+        },
+        {
+          "activity": "DEDUPLICATING",
+          "label": "消除重复知识点",
+          "status": "pending",
+          "message": "",
+          "message_seq": 0,
+          "progress": null,
+          "started_at": null,
+          "completed_at": null,
+          "attempt": null
+        },
+        {
+          "activity": "BUILDING_GLOBAL_EDGES",
+          "label": "建立跨章节关系",
+          "status": "pending",
+          "message": "",
+          "message_seq": 0,
+          "progress": null,
+          "started_at": null,
+          "completed_at": null,
+          "attempt": null
+        },
+        {
+          "activity": "QUALITY_CHECKING",
+          "label": "检查图谱质量",
+          "status": "pending",
+          "message": "",
+          "message_seq": 0,
+          "progress": null,
+          "started_at": null,
+          "completed_at": null,
+          "attempt": null
+        },
+        {
+          "activity": "BUILDING_COMMUNITIES",
+          "label": "组织知识主题",
+          "status": "pending",
+          "message": "",
+          "message_seq": 0,
+          "progress": null,
+          "started_at": null,
+          "completed_at": null,
+          "attempt": null
+        },
+        {
+          "activity": "FINALIZING",
+          "label": "整理最终图谱",
+          "status": "pending",
+          "message": "",
+          "message_seq": 0,
+          "progress": null,
+          "started_at": null,
+          "completed_at": null,
+          "attempt": null
+        },
+        {
+          "activity": "ARTIFACT_PUBLISHING",
+          "label": "发布图谱产物",
+          "status": "pending",
+          "message": "",
+          "message_seq": 0,
+          "progress": null,
+          "started_at": null,
+          "completed_at": null,
+          "attempt": null
+        }
+      ]
+    },
+    "recovered": {
+      "timeline_schema_version": "1.0",
+      "attempt": 2,
+      "activity": "EXTRACTING_CHUNK",
+      "message": "已恢复，正在分析第 8/28 个内容块",
+      "message_seq": 4,
+      "progress": {
+        "current": 7,
+        "total": 28,
+        "percent": 25
+      },
+      "timeline": [
+        {
+          "activity": "DOCUMENT_INGESTING",
+          "label": "读取文档内容",
+          "status": "completed",
+          "message": "读取文档内容完成",
+          "message_seq": 2,
+          "progress": null,
+          "started_at": "2026-07-15T00:00:00Z",
+          "completed_at": "2026-07-15T00:00:30Z",
+          "attempt": 1
+        },
+        {
+          "activity": "CHUNK_PLANNING",
+          "label": "规划处理单元",
+          "status": "completed",
+          "message": "规划处理单元完成",
+          "message_seq": 2,
+          "progress": null,
+          "started_at": "2026-07-15T00:01:00Z",
+          "completed_at": "2026-07-15T00:01:30Z",
+          "attempt": 1
+        },
+        {
+          "activity": "EXTRACTING_CHUNK",
+          "label": "抽取知识点",
+          "status": "running",
+          "message": "已恢复，正在分析第 8/28 个内容块",
+          "message_seq": 4,
+          "progress": {
+            "current": 7,
+            "total": 28,
+            "percent": 25
+          },
+          "started_at": "2026-07-15T00:02:00Z",
+          "completed_at": null,
+          "attempt": 2
+        },
+        {
+          "activity": "DEDUPLICATING",
+          "label": "消除重复知识点",
+          "status": "pending",
+          "message": "",
+          "message_seq": 0,
+          "progress": null,
+          "started_at": null,
+          "completed_at": null,
+          "attempt": null
+        },
+        {
+          "activity": "BUILDING_GLOBAL_EDGES",
+          "label": "建立跨章节关系",
+          "status": "pending",
+          "message": "",
+          "message_seq": 0,
+          "progress": null,
+          "started_at": null,
+          "completed_at": null,
+          "attempt": null
+        },
+        {
+          "activity": "QUALITY_CHECKING",
+          "label": "检查图谱质量",
+          "status": "pending",
+          "message": "",
+          "message_seq": 0,
+          "progress": null,
+          "started_at": null,
+          "completed_at": null,
+          "attempt": null
+        },
+        {
+          "activity": "BUILDING_COMMUNITIES",
+          "label": "组织知识主题",
+          "status": "pending",
+          "message": "",
+          "message_seq": 0,
+          "progress": null,
+          "started_at": null,
+          "completed_at": null,
+          "attempt": null
+        },
+        {
+          "activity": "FINALIZING",
+          "label": "整理最终图谱",
+          "status": "pending",
+          "message": "",
+          "message_seq": 0,
+          "progress": null,
+          "started_at": null,
+          "completed_at": null,
+          "attempt": null
+        },
+        {
+          "activity": "ARTIFACT_PUBLISHING",
+          "label": "发布图谱产物",
+          "status": "pending",
+          "message": "",
+          "message_seq": 0,
+          "progress": null,
+          "started_at": null,
+          "completed_at": null,
+          "attempt": null
+        }
+      ]
+    }
+  }
+}
+

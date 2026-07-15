@@ -8,3 +8,4 @@ class RunCommand(BaseModel):
     request_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     request_json: dict[str, object]
     output_uri: str
+    resolved_package_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")

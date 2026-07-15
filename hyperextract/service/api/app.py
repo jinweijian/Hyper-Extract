@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from hyperextract.service.errors import ServiceError
@@ -15,6 +16,32 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=error.status_code,
             content=error.body(),
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_handler(
+        request: Request, _error: RequestValidationError
+    ):
+        if request.method == "POST" and request.url.path == "/v1/runs":
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "code": "INVALID_MULTIPART_REQUEST",
+                        "message": "multipart request fields are invalid or missing",
+                        "details": [],
+                    }
+                },
+            )
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": {
+                    "code": "REQUEST_VALIDATION_FAILED",
+                    "message": "request validation failed",
+                    "details": [],
+                }
+            },
         )
 
 

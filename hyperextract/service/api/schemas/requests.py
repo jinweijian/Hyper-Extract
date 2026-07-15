@@ -11,14 +11,6 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class RunInput(StrictModel):
-    type: Literal["document_package"]
-    contract_version: DocumentPackageVersion
-    package_uri: str
-    package_format: Literal["directory"]
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-
-
 class RunBudget(StrictModel):
     max_model_calls: int | None = Field(default=None, ge=1)
     max_input_tokens: int | None = Field(default=None, ge=1)
@@ -47,8 +39,15 @@ class ClientContext(StrictModel):
     course_id: str | None = Field(default=None, max_length=128)
 
 
-class RunCreateRequest(StrictModel):
-    input: RunInput
+class RunOptions(StrictModel):
+    """The parsed ``options`` JSON string from the multipart form.
+
+    Pipeline and execution are required; client_context is optional and
+    defaults to an empty context. This is the strict contract for what a
+    caller may influence — it deliberately excludes any package path, URI,
+    or transport metadata.
+    """
+
     pipeline: PipelineSelection
     execution: RunExecution = Field(default_factory=RunExecution)
     client_context: ClientContext = Field(default_factory=ClientContext)
@@ -56,5 +55,4 @@ class RunCreateRequest(StrictModel):
 
 class ValidatePackageRequest(StrictModel):
     contract_version: DocumentPackageVersion
-    package_uri: str
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    package_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")

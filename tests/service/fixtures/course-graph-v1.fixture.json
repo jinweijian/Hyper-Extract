@@ -1,0 +1,55 @@
+{
+  "schema_name": "HyperExtractCourseGraph",
+  "schema_version": "1.0",
+  "run_id": "run_he_fixture",
+  "profile_version": "1.1.0",
+  "outline_nodes": [
+    {
+      "id": "outline-root",
+      "name": "示例教材",
+      "node_type": "book",
+      "depth": 0,
+      "parent_id": null,
+      "order": 0,
+      "source_refs": [
+        {
+          "ref": "content/chapter-1.md#L1-L2",
+          "source_path": "/exchange/packages/pkg_fixture.hepkg/content/chapter-1.md"
+        }
+      ]
+    }
+  ],
+  "knowledge_nodes": [
+    {
+      "id": "knowledge-1",
+      "name": "项目章程",
+      "level": "point",
+      "parent_outline_id": "outline-root",
+      "summary": "正式批准项目的文件",
+      "evidence": "项目章程正式批准项目。",
+      "source_refs": [
+        {
+          "ref": "content/chapter-1.md#L3-L4",
+          "source_path": "/exchange/packages/pkg_fixture.hepkg/content/chapter-1.md"
+        }
+      ],
+      "profile_version": "1.1.0",
+      "run_id": "run_he_fixture",
+      "knowledge_kind": "concept",
+      "parent_knowledge_id": null,
+      "aliases": [],
+      "learning_objective": null,
+      "confidence": 0.9
+    }
+  ],
+  "structural_edges": [
+    {
+      "source_id": "outline-root",
+      "target_id": "knowledge-1",
+      "edge_type": "describes",
+      "system_generated": true
+    }
+  ],
+  "semantic_edges": []
+}
+

@@ -41,6 +41,27 @@ def test_pipeline_injects_run_id_and_emits_events(tmp_path):
     )
     assert result["run_id"] == "run_service_1"
     assert events
+    lifecycle = [
+        (event.stage, event.status)
+        for event in events
+        if event.status in {"started", "completed"}
+    ]
+    for stage in (
+        "ingest",
+        "chunk_plan",
+        "local_extract",
+        "deduplicate",
+        "global_edges",
+        "quality",
+        "communities",
+        "finalize",
+    ):
+        assert (stage, "started") in lifecycle
+        assert (stage, "completed") in lifecycle
+        assert lifecycle.index((stage, "started")) < lifecycle.index(
+            (stage, "completed")
+        )
+    assert lifecycle.count(("local_extract", "completed")) == 1
     graph = json.loads((tmp_path / "output/course-graph.json").read_text())
     assert graph["run_id"] == "run_service_1"
 

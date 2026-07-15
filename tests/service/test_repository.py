@@ -17,6 +17,7 @@ def command(run_id="run_1", request_fingerprint=None):
         request_fingerprint=request_fingerprint or hashlib.sha256(b"request").hexdigest(),
         request_json={"input": {}},
         output_uri=f"file:///exchange/runs/{run_id}/",
+        resolved_package_fingerprint="b" * 64,
     )
 
 
@@ -224,6 +225,7 @@ def test_mark_cancelled_rejects_non_running(repository):
         request_fingerprint="a" * 64,
         request_json={},
         output_uri="file:///exchange/runs/run_queued/",
+        resolved_package_fingerprint="b" * 64,
     )
     repository.create_or_get(command, "queued-key")
     with pytest.raises(InvalidRunState):
@@ -240,6 +242,7 @@ def test_renew_lease_returns_false_for_non_running(repository):
         request_fingerprint="b" * 64,
         request_json={},
         output_uri="file:///exchange/runs/run_queued2/",
+        resolved_package_fingerprint="b" * 64,
     )
     repository.create_or_get(command, "queued2-key")
     assert repository.renew_lease("run_queued2", "worker-1", lease_seconds=60) is False
@@ -265,6 +268,7 @@ def test_requeue_expired_leases_cancels_cancel_requested(repository):
         request_fingerprint="c" * 64,
         request_json={},
         output_uri="file:///exchange/runs/run_cancel_expired/",
+        resolved_package_fingerprint="b" * 64,
     )
     repository.create_or_get(command, "cancel-expired-key")
     repository.claim_next("worker-1", lease_seconds=120)
@@ -286,6 +290,7 @@ def test_requeue_expired_leases_fails_when_recovery_exhausted(repository):
         request_fingerprint="d" * 64,
         request_json={},
         output_uri="file:///exchange/runs/run_exhausted/",
+        resolved_package_fingerprint="b" * 64,
     )
     repository.create_or_get(command, "exhausted-key")
     repository.claim_next("worker-1", lease_seconds=120)
@@ -317,6 +322,7 @@ def test_requeue_expired_leases_increments_recovery_count(repository):
         request_fingerprint="e" * 64,
         request_json={},
         output_uri="file:///exchange/runs/run_recoverable/",
+        resolved_package_fingerprint="b" * 64,
     )
     repository.create_or_get(command, "recoverable-key")
     repository.claim_next("worker-1", lease_seconds=120)

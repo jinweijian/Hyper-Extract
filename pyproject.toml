@@ -42,6 +42,8 @@ dependencies = [
     "typer>=0.13.0",
     "rich>=13.7.0",
     "tomli-w>=1.0.0",
+    # multipart upload (POST /v1/runs)
+    "python-multipart>=0.0.18",
 ]
 
 [dependency-groups]

@@ -9,6 +9,10 @@ from hyperextract.service.runtime import create_runtime
 @pytest.fixture
 def fake_profiles():
     class FakeProfiles:
+        def validate(self, name, *, require_secrets=False, require_embedder=False, check_probe=False):
+            if name != "openai-compatible-default":
+                raise KeyError(name)
+
         def public_descriptor(self, name):
             if name != "openai-compatible-default":
                 raise KeyError(name)
@@ -37,6 +41,7 @@ def test_run_command_is_not_owned_by_http_schemas():
         run_id="run_test",
         request_fingerprint="a" * 64,
         request_json={"input": {}},
-        output_uri="file:///exchange/runs/run_test/",
+        output_uri="/v1/runs/run_test",
+        resolved_package_fingerprint="b" * 64,
     )
     assert command.run_id == "run_test"

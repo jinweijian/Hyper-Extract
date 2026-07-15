@@ -2,6 +2,8 @@
 
 Document Package is the stable boundary between a document parser and Hyper-Extract. The producer may be local Docling, a remote Docling API, or another parser. Hyper-Extract does not install, start, or call that parser.
 
+The Document Package **directory** is the content contract. For cross-service transport, callers pack it into a `.hepkg.tar.gz` archive whose root **directly** contains `manifest.json`, `outline.json`, `provenance.jsonl`, `extraction-brief.yaml`, and `content/` — with no nested top-level directory. Two distinct hashes apply: `package_fingerprint` (the canonical SHA-256 of the *extracted* package) and `transport_sha256` (the SHA-256 of the tarball byte stream). They are validated independently and must not be substituted for one another.
+
 ## Layout
 
 ```text

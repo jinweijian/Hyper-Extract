@@ -13,7 +13,7 @@ from hyperextract.service.errors import ServiceError
 from hyperextract.service.runtime import ServiceRuntime
 
 from ..dependencies import get_runtime
-from ..schemas import ValidatePackageRequest
+from ..schemas import ResultMetadataResponse, RunResponse, ValidatePackageRequest
 
 router = APIRouter()
 
@@ -23,8 +23,21 @@ def capabilities() -> dict:
     return {
         "pipelines": ["course_graph"],
         "document_package_versions": ["1.0", "1.1"],
-        "package_schemes": ["file"],
-        "lifecycle": ["create", "status", "cancel", "resume", "artifacts"],
+        "package_schemes": ["http-multipart"],
+        "timeline_schema_versions": ["1.0"],
+        "contracts": {
+            "run_status": "/v1/contracts/run-status/v1",
+            "result_metadata": "/v1/contracts/result-metadata/v1",
+        },
+        "lifecycle": [
+            "create",
+            "status",
+            "cancel",
+            "resume",
+            "artifacts",
+            "result",
+            "result-metadata",
+        ],
     }
 
 
@@ -33,13 +46,23 @@ def package_contract() -> dict:
     return document_package_contract()
 
 
+@router.get("/v1/contracts/run-status/v1")
+def run_status_contract() -> dict:
+    return RunResponse.model_json_schema()
+
+
+@router.get("/v1/contracts/result-metadata/v1")
+def result_metadata_contract() -> dict:
+    return ResultMetadataResponse.model_json_schema()
+
+
 @router.post("/v1/document-packages/validate")
 def validate_package(
     payload: ValidatePackageRequest,
     runtime: ServiceRuntime = Depends(get_runtime),
 ) -> dict:
     try:
-        package = runtime.storage.resolve_package_uri(payload.package_uri)
+        package = runtime.storage.resolve_package_ref(payload.package_fingerprint)
         validated = validate_document_package(package)
         validate_service_package_layout(validated, payload.contract_version)
         actual = document_package_fingerprint(package)
@@ -47,7 +70,7 @@ def validate_package(
         raise ServiceError(422, error.code, error.message) from error
     except ValueError as error:
         raise ServiceError(422, "DOCUMENT_PACKAGE_INVALID", str(error)) from error
-    if actual != payload.sha256:
+    if actual != payload.package_fingerprint:
         raise ServiceError(
             422,
             "DOCUMENT_PACKAGE_HASH_MISMATCH",

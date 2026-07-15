@@ -33,6 +33,7 @@ def _make_command(run_id, output_uri):
         request_fingerprint="a" * 64,
         request_json={},
         output_uri=output_uri,
+        resolved_package_fingerprint="b" * 64,
     )
 
 
@@ -42,6 +43,7 @@ def test_worker_claims_executes_and_publishes(repository, settings):
         request_fingerprint="a" * 64,
         request_json={},
         output_uri=(settings.run_root / "run_worker").as_uri() + "/",
+        resolved_package_fingerprint="b" * 64,
     )
     repository.create_or_get(command, "worker-test")
     work = settings.run_root / "run_worker" / "work"
@@ -59,6 +61,71 @@ def test_worker_claims_executes_and_publishes(repository, settings):
         (settings.run_root / "run_worker/artifacts/artifact-manifest.json").read_text()
     )
     assert manifest["status"] == "completed"
+
+
+def test_worker_records_publish_stage_before_artifact_publisher(
+    repository, settings
+):
+    from hyperextract.service.timeline import read_timeline
+
+    run_id = "run_publish_stage"
+    repository.create_or_get(
+        _make_command(run_id, (settings.run_root / run_id).as_uri() + "/"),
+        "publish-stage-key",
+    )
+    (settings.run_root / run_id / "work").mkdir(parents=True)
+
+    class InspectingPublisher(ArtifactPublisher):
+        def publish(self, record, summary):
+            current = repository.get(record.run_id)
+            assert current.status == "running"
+            assert current.stage == "publish"
+            return super().publish(record, summary)
+
+    worker = ServiceWorker(
+        repository,
+        FakeExecutor(),
+        InspectingPublisher(settings.run_root),
+        settings,
+        worker_id="worker-publish",
+    )
+    assert worker.run_once() is True
+    state = read_timeline(settings.run_root / run_id / "state" / "timeline.json")
+    assert state is not None
+    assert state.steps[-1].activity == "ARTIFACT_PUBLISHING"
+    assert state.steps[-1].status == "completed"
+
+
+def test_artifact_publish_failure_is_reported_at_publish_stage(repository, settings):
+    from hyperextract.service.timeline import read_timeline
+
+    run_id = "run_publish_failure"
+    repository.create_or_get(
+        _make_command(run_id, (settings.run_root / run_id).as_uri() + "/"),
+        "publish-failure-key",
+    )
+    (settings.run_root / run_id / "work").mkdir(parents=True)
+
+    class FailingPublisher(ArtifactPublisher):
+        def publish(self, record, summary):
+            assert repository.get(record.run_id).stage == "publish"
+            raise ValueError("required artifact missing: course-graph.json")
+
+    worker = ServiceWorker(
+        repository,
+        FakeExecutor(),
+        FailingPublisher(settings.run_root),
+        settings,
+        worker_id="worker-publish-failure",
+    )
+    assert worker.run_once() is True
+    record = repository.get(run_id)
+    assert record.status == "failed"
+    assert record.stage == "publish"
+    body = read_timeline(
+        settings.run_root / run_id / "state" / "timeline.json"
+    )
+    assert body.steps[-1].status == "failed"
 
 
 # ---------------------------------------------------------------------------

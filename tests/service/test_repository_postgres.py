@@ -49,6 +49,7 @@ def test_concurrent_create_or_get_returns_single_row():
                 request_fingerprint=fingerprint,
                 request_json={"input": {}},
                 output_uri=f"file:///exchange/runs/run_concurrent_{index}/",
+                resolved_package_fingerprint="b" * 64,
             )
             for index in range(2)
         ]
@@ -124,6 +125,7 @@ def test_stale_worker_cannot_complete_after_postgres_reclaim():
                 request_fingerprint="a" * 64,
                 request_json={"input": {}},
                 output_uri=f"file:///exchange/runs/{run_id}/",
+                resolved_package_fingerprint="b" * 64,
             ),
             idempotency_key,
         )

@@ -77,7 +77,7 @@ def test_fingerprint_is_stable_and_excludes_secrets(profile_file, monkeypatch):
 
 
 def test_api_create_run_succeeds_without_model_secrets(
-    profile_file, exchange_root, repository, package_path, monkeypatch
+    profile_file, exchange_root, repository, package_v1_1, monkeypatch
 ):
     """API must accept run creation with no model provider keys in env."""
     monkeypatch.delenv("MIMIMAX_API_KEY", raising=False)
@@ -98,24 +98,20 @@ def test_api_create_run_succeeds_without_model_secrets(
         model_profiles=ModelProfileRegistry(profile_file),
     )
 
-    payload = {
-        "input": {
-            "type": "document_package",
-            "contract_version": "1.0",
-            "package_uri": package_path.as_uri(),
-            "package_format": "directory",
-            "sha256": document_package_fingerprint(package_path),
-        },
-        "pipeline": {
-            "name": "course_graph",
-            "profile": {"name": "course_knowledge_graph", "version": "1"},
-        },
-        "execution": {"model_profile": "minimax-course-default"},
-    }
+    from tests.service.conftest import multipart_create_payload
+
+    data, files = multipart_create_payload(
+        package_v1_1,
+        contract_version="1.1",
+        options={"execution": {"model_profile": "minimax-course-default"}},
+    )
 
     with TestClient(create_app(runtime=runtime)) as client:
         response = client.post(
-            "/v1/runs", headers={"Idempotency-Key": "no-secrets"}, json=payload
+            "/v1/runs",
+            headers={"Idempotency-Key": "no-secrets"},
+            data=data,
+            files=files,
         )
 
     assert response.status_code == 202
