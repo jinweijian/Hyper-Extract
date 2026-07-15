@@ -51,49 +51,38 @@ def test_context_excludes_secrets_and_runtime_data():
     assert "exchange/" in ignored
 
 
-def test_compose_has_migration_gate_and_database_volume(compose):
+def test_docker_data_root_is_tracked_but_runtime_data_is_ignored():
+    text = (ROOT / "docker/data/.gitignore").read_text().splitlines()
+    assert text == ["*", "!.gitignore"]
+
+
+def test_compose_uses_host_data_directories_and_no_named_volumes(compose):
     services = compose["services"]
-    assert services["he-migrate"]["command"] == [
-        "alembic",
-        "upgrade",
-        "head",
-    ]
+    assert "he-migrate" not in services
+    assert "volumes" not in compose
+    postgres = services["postgres"]
+    assert postgres["environment"]["PGDATA"] == "/var/lib/postgresql/data/pgdata"
     assert (
-        services["he-api"]["depends_on"]["he-migrate"]["condition"]
-        == "service_completed_successfully"
+        "${HE_DATA_ROOT:-./data}/postgres:/var/lib/postgresql/data"
+        in postgres["volumes"]
     )
+    exchange = "${HE_DATA_ROOT:-./data}/exchange:/exchange"
+    assert exchange in services["he-api"]["volumes"]
+    assert exchange in services["he-worker"]["volumes"]
     assert (
-        services["he-worker"]["depends_on"]["he-migrate"]["condition"]
-        == "service_completed_successfully"
-    )
-    assert "postgres-data:/var/lib/postgresql/data" in services["postgres"]["volumes"]
-    assert (
-        services["postgres"]["environment"]["POSTGRES_PASSWORD"]
+        postgres["environment"]["POSTGRES_PASSWORD"]
         == "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}"
     )
 
 
-def test_compose_migration_is_one_shot_and_postgres_unpublished(compose):
+def test_api_and_worker_depend_only_on_healthy_postgres(compose):
     services = compose["services"]
-    # he-migrate must never restart — it runs once and exits.
-    assert services["he-migrate"]["restart"] == "no"
-    # he-migrate must wait for postgres to be healthy before applying migrations.
-    assert (
-        services["he-migrate"]["depends_on"]["postgres"]["condition"]
-        == "service_healthy"
-    )
-    # API and Worker commands must be ONLY the entrypoint binary — no inline
-    # `alembic upgrade head` chaining, since he-migrate owns migrations. The
-    # runtime image places the venv on PATH, so the binaries run directly
-    # without `uv run`.
-    assert services["he-api"]["command"] == ["he-api"]
-    assert services["he-worker"]["command"] == ["he-worker"]
-    # PostgreSQL must never publish ports to the host.
-    assert "ports" not in services["postgres"]
-    # postgres-data volume must be declared at the top level.
-    assert "postgres-data" in compose["volumes"]
-    for name in ("he-migrate", "he-api", "he-worker"):
+    for name in ("he-api", "he-worker"):
+        assert services[name]["depends_on"] == {
+            "postgres": {"condition": "service_healthy"}
+        }
         assert services[name]["image"] == "${HE_IMAGE:-hyper-extract-service:dev}"
+    assert "ports" not in services["postgres"]
 
 
 def test_api_has_no_secrets_or_egress_and_worker_does(compose):
@@ -120,12 +109,10 @@ def test_api_has_no_secrets_or_egress_and_worker_does(compose):
 def test_worker_persists_capability_probe_evidence_in_exchange(compose):
     worker = compose["services"]["he-worker"]
     assert worker["environment"]["HE_PROBE_ROOT"] == "/exchange/probes"
-    assert "exchange-data:/exchange" in worker["volumes"]
+    assert "${HE_DATA_ROOT:-./data}/exchange:/exchange" in worker["volumes"]
 
 
-def test_exchange_volume_has_stable_external_name(compose):
-    volume = compose["volumes"]["exchange-data"]
-    assert volume["name"] == "${EXCHANGE_VOLUME_NAME:-hyper-extract-exchange}"
+def test_service_api_network_has_stable_name(compose):
     assert (
         compose["networks"]["service-api"]["name"]
         == "${API_NETWORK_NAME:-hyper-extract-api}"
@@ -134,7 +121,7 @@ def test_exchange_volume_has_stable_external_name(compose):
 
 def test_three_networks_have_distinct_responsibilities(compose):
     networks = compose["networks"]
-    # database is internal-only (postgres + migrate + service cores).
+    # database is internal-only (postgres + service cores).
     assert networks["database"]["internal"] is True
     # service-api is internal and named for external callers to attach to.
     assert networks["service-api"]["internal"] is True
@@ -151,7 +138,13 @@ def test_api_and_worker_share_the_same_profile_mount(compose):
     expected_env = "/run/config/model-profiles.toml"
     assert api["environment"]["HE_SERVICE_MODEL_PROFILES"] == expected_env
     assert worker["environment"]["HE_SERVICE_MODEL_PROFILES"] == expected_env
-    expected_mount = "${MODEL_PROFILES_FILE:-./conf/model-profiles.example.toml}:/run/config/model-profiles.toml:ro"
+    expected_mount = {
+        "type": "bind",
+        "source": "${MODEL_PROFILES_FILE:-./conf/model-profiles.example.toml}",
+        "target": expected_env,
+        "read_only": True,
+        "bind": {"create_host_path": False},
+    }
     assert expected_mount in api["volumes"]
     assert expected_mount in worker["volumes"]
 
@@ -176,7 +169,6 @@ def test_env_example_lists_required_operator_variables():
     text = (ROOT / "docker" / ".env.example").read_text()
     for key in (
         "POSTGRES_PASSWORD",
-        "EXCHANGE_VOLUME_NAME",
         "API_NETWORK_NAME",
         "HE_API_PORT",
         "PLATFORM",
@@ -190,6 +182,7 @@ def test_env_example_lists_required_operator_variables():
         "MINIMAX_API_KEY",
     ):
         assert key in text
+    assert "EXCHANGE_VOLUME_NAME" not in text
     assert "MIMIMAX_API_KEY" not in text
 
 
@@ -256,5 +249,3 @@ def test_api_and_worker_restart_unless_stopped(compose):
     services = compose["services"]
     assert services["he-api"]["restart"] == "unless-stopped"
     assert services["he-worker"]["restart"] == "unless-stopped"
-    # Migration remains one-shot.
-    assert services["he-migrate"]["restart"] == "no"

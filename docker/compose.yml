@@ -6,28 +6,14 @@ services:
       POSTGRES_DB: hyperextract
       POSTGRES_USER: hyperextract
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - ${HE_DATA_ROOT:-./data}/postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U hyperextract"]
       interval: 5s
       timeout: 3s
       retries: 20
-    networks: [database]
-
-  he-migrate:
-    image: ${HE_IMAGE:-hyper-extract-service:dev}
-    platform: ${PLATFORM:-linux/amd64}
-    build:
-      context: ..
-      dockerfile: docker/image/Dockerfile
-    command: ["alembic", "upgrade", "head"]
-    restart: "no"
-    environment:
-      HE_SERVICE_DATABASE_URL: postgresql+psycopg://hyperextract:${POSTGRES_PASSWORD}@postgres/hyperextract
-    depends_on:
-      postgres:
-        condition: service_healthy
     networks: [database]
 
   he-api:
@@ -53,13 +39,16 @@ services:
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
       EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
     volumes:
-      - exchange-data:/exchange
-      - ${MODEL_PROFILES_FILE:-./conf/model-profiles.example.toml}:/run/config/model-profiles.toml:ro
+      - ${HE_DATA_ROOT:-./data}/exchange:/exchange
+      - type: bind
+        source: ${MODEL_PROFILES_FILE:-./conf/model-profiles.example.toml}
+        target: /run/config/model-profiles.toml
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
       postgres:
         condition: service_healthy
-      he-migrate:
-        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://127.0.0.1:8000/health/ready',timeout=2).status==200 else 1)\""]
       interval: 10s
@@ -88,19 +77,17 @@ services:
       HE_SERVICE_PIPELINE_MAX_WORKERS: ${HE_SERVICE_PIPELINE_MAX_WORKERS:-2}
       HE_PROBE_ROOT: /exchange/probes
     volumes:
-      - exchange-data:/exchange
-      - ${MODEL_PROFILES_FILE:-./conf/model-profiles.example.toml}:/run/config/model-profiles.toml:ro
+      - ${HE_DATA_ROOT:-./data}/exchange:/exchange
+      - type: bind
+        source: ${MODEL_PROFILES_FILE:-./conf/model-profiles.example.toml}
+        target: /run/config/model-profiles.toml
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
       postgres:
         condition: service_healthy
-      he-migrate:
-        condition: service_completed_successfully
     networks: [database, model-egress]
-
-volumes:
-  exchange-data:
-    name: ${EXCHANGE_VOLUME_NAME:-hyper-extract-exchange}
-  postgres-data:
 
 networks:
   database:
