@@ -63,6 +63,35 @@ def test_publish_validates_hashes_and_writes_success_last(exchange_root):
     }
 
 
+def test_publish_includes_model_audit_artifacts(exchange_root):
+    run_id = "run_model_audit"
+    work = exchange_root / "runs" / run_id / "work"
+    work.mkdir(parents=True)
+    write_graph(work, run_id)
+    checkpoint = work / ".he-run"
+    audit_files = {
+        "raw-responses/request-1.json": "{}",
+        "validation/request-1.json": "{}",
+        "rejections/request-1.jsonl": "{}\n",
+        "embedding-rejections/embedding-1.json": "{}",
+        "diagnostics/model-gateway-events.jsonl": "{}\n",
+    }
+    for relative, content in audit_files.items():
+        path = checkpoint / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    manifest = ArtifactPublisher(exchange_root / "runs").publish(
+        record(run_id, exchange_root / "runs"), {}
+    )
+
+    published_paths = {item.path for item in manifest.artifacts}
+    for relative in audit_files:
+        published = f"model-audit/{relative}"
+        assert published in published_paths
+        assert (exchange_root / "runs" / run_id / "artifacts" / published).is_file()
+
+
 def test_publish_refuses_partial_graph(exchange_root):
     run_id = "run_partial"
     (exchange_root / "runs" / run_id / "work").mkdir(parents=True)

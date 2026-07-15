@@ -1,6 +1,16 @@
 # Provider 系统
 
-Hyper-Extract 支持三种接入方式：**OpenAI**、**阿里云百炼**、**本地 vLLM**。统一使用 `create_client()` 接口，仅需修改第一行。
+Hyper-Extract 将供应商通信协议与模型能力分开。OpenAI Chat 兼容端点共用 Adapter，而每个命名 Model Profile 显式声明结构化输出模式、token 参数映射、reasoning 载荷、Embedding 限制和恢复预算。兼容性以通过校验的 Profile 或 Probe 证据为准，不根据供应商名或模型名猜测。
+
+保守的 `openai-compatible-default` Profile 读取 `OPENAI_MODEL`、`OPENAI_BASE_URL` 和 `OPENAI_API_KEY`，只启用 `text_json`。Embedding 使用独立的 `EMBEDDING_*` 路由。
+
+```bash
+he model validate --profile openai-compatible-default
+he model show --profile openai-compatible-default
+he model probe --profile production-profile --file model-profiles.toml
+```
+
+`validate` 只进行本地校验；`probe` 发起小额真实性请求，并将证据缓存到 `~/.he/probes/`。配置 `probe_required = true` 的 Profile 在缺少有效成功证据时不能启动。
 
 ---
 

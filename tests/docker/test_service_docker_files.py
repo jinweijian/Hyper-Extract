@@ -90,12 +90,30 @@ def test_api_has_no_secrets_or_egress_and_worker_does(compose):
     assert compose["services"]["postgres"]["networks"] == ["database"]
     assert "service-api" in api["networks"]
     assert "service-api" not in worker["networks"]
+    for secret in ("OPENAI_API_KEY", "EMBEDDING_API_KEY", "ANTHROPIC_API_KEY"):
+        assert secret not in api["environment"]
+    for setting in (
+        "OPENAI_MODEL",
+        "OPENAI_BASE_URL",
+        "EMBEDDING_MODEL",
+        "EMBEDDING_BASE_URL",
+    ):
+        assert setting in api["environment"]
+
+
+def test_worker_persists_capability_probe_evidence_in_exchange(compose):
+    worker = compose["services"]["he-worker"]
+    assert worker["environment"]["HE_PROBE_ROOT"] == "/exchange/probes"
+    assert "exchange-data:/exchange" in worker["volumes"]
 
 
 def test_exchange_volume_has_stable_external_name(compose):
     volume = compose["volumes"]["exchange-data"]
     assert volume["name"] == "${EXCHANGE_VOLUME_NAME:-hyper-extract-exchange}"
-    assert compose["networks"]["service-api"]["name"] == "${API_NETWORK_NAME:-hyper-extract-api}"
+    assert (
+        compose["networks"]["service-api"]["name"]
+        == "${API_NETWORK_NAME:-hyper-extract-api}"
+    )
 
 
 def test_three_networks_have_distinct_responsibilities(compose):
@@ -105,7 +123,10 @@ def test_three_networks_have_distinct_responsibilities(compose):
     # service-api is internal and named for external callers to attach to.
     assert networks["service-api"]["internal"] is True
     # model-egress has outbound access (no `internal: true`).
-    assert "internal" not in networks["model-egress"] or networks["model-egress"].get("internal") is not True
+    assert (
+        "internal" not in networks["model-egress"]
+        or networks["model-egress"].get("internal") is not True
+    )
 
 
 def test_api_and_worker_share_the_same_profile_mount(compose):
@@ -145,15 +166,22 @@ def test_env_example_lists_required_operator_variables():
         "PLATFORM",
         "HE_IMAGE",
         "MODEL_PROFILES_FILE",
+        "OPENAI_MODEL",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+        "EMBEDDING_MODEL",
+        "EMBEDDING_API_KEY",
+        "MINIMAX_API_KEY",
     ):
         assert key in text
+    assert "MIMIMAX_API_KEY" not in text
 
 
-def test_docker_readme_documents_exchange_and_scaling():
+def test_docker_readme_documents_exchange_and_safe_worker_limit():
     text = (ROOT / "docker" / "README.md").read_text()
     assert "/exchange" in text
     assert "10001" in text
-    assert "--scale he-worker" in text
+    assert "do not use Compose `--scale`" in text
 
 
 def test_smoke_script_is_isolated_and_cleans_up():

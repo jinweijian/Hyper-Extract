@@ -18,7 +18,7 @@ router = APIRouter()
 
 # The profile the API validates during readiness. It must match the Worker's
 # default profile so both processes agree on the secret-free fingerprint.
-DEFAULT_PROFILE_NAME = "minimax-course-default"
+DEFAULT_PROFILE_NAME = "openai-compatible-default"
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
 
@@ -77,7 +77,24 @@ def _check_run_root(runtime: ServiceRuntime) -> bool:
 
 def _check_model_profiles(runtime: ServiceRuntime) -> bool:
     try:
-        runtime.model_profiles.public_descriptor(DEFAULT_PROFILE_NAME)
+        readiness_profiles = getattr(runtime.model_profiles, "readiness_profiles", None)
+        names = (
+            readiness_profiles()
+            if callable(readiness_profiles)
+            else [DEFAULT_PROFILE_NAME]
+        )
+        if not names:
+            return False
+        validate_profile = getattr(runtime.model_profiles, "validate", None)
+        for name in names:
+            if callable(validate_profile):
+                validate_profile(
+                    name,
+                    require_secrets=False,
+                    require_embedder=True,
+                    check_probe=True,
+                )
+            runtime.model_profiles.public_descriptor(name)
         return True
     except Exception:
         return False

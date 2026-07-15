@@ -26,7 +26,7 @@ export HE_IMAGE="$SMOKE_ID-service:dev"
 
 # No provider keys: the smoke must not reach any model endpoint.
 export OPENAI_API_KEY=""
-export MIMIMAX_API_KEY=""
+export MINIMAX_API_KEY=""
 export EMBEDDING_API_KEY=""
 export ANTHROPIC_API_KEY=""
 

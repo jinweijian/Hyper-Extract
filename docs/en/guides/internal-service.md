@@ -53,7 +53,7 @@ curl -X POST http://he-api:8000/v1/runs \
   -d '{
     "input":{"type":"document_package","contract_version":"1.1","package_uri":"file:///exchange/packages/course.hepkg/","package_format":"directory","sha256":"<canonical-fingerprint>"},
     "pipeline":{"name":"course_graph","profile":{"name":"course_knowledge_graph","version":"1"}},
-    "execution":{"model_profile":"minimax-course-default","context_policy":"auto","priority":"normal"}
+    "execution":{"model_profile":"openai-compatible-default","context_policy":"auto","priority":"normal"}
   }'
 ```
 
@@ -87,12 +87,14 @@ Deployments may configure per-million-token rates:
 ```bash
 HYPER_EXTRACT_INPUT_COST_PER_MILLION=1.0
 HYPER_EXTRACT_OUTPUT_COST_PER_MILLION=4.0
+HYPER_EXTRACT_EMBEDDING_INPUT_COST_PER_MILLION=0.1
 HYPER_EXTRACT_COST_CURRENCY=USD
 ```
 
-Without both rates, `cost-report.json` still records tokens but is explicitly
-`unpriced` with a `null` amount. Hyper-Extract does not guess live provider
-pricing.
+Generation and embedding tokens are priced independently. Missing rates leave
+the corresponding token class unpriced; the report is `partially_priced` when
+only some classes have rates, and `unpriced` with a `null` amount when none do.
+Hyper-Extract does not guess live provider pricing.
 
 The first deployment supports shared-volume `file://` packages. HTTP and
 object-storage sources are adapters that must materialize the same immutable

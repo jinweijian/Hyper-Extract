@@ -82,7 +82,7 @@ he config set llm.base_url https://your-provider.com/v1
 ### Which models are supported?
 
 - OpenAI models (gpt-4o, gpt-4o-mini, etc.)
-- Any OpenAI-compatible API
+- OpenAI-compatible APIs whose declared Model Profile passes validation/probe
 
 ---
 

@@ -134,7 +134,7 @@ Hyper-Extract 依赖大语言模型的结构化输出能力（`json_schema` 或 
 | **阿里云百炼** | qwen-plus, qwen-turbo, deepseek-r1 |
 | **本地 vLLM** | Qwen3.5-9B (GPTQ-Marlin) |
 
-**嵌入模型**（语义搜索）支持任意 OpenAI 兼容端点：`text-embedding-3-small`、`text-embedding-v4`（百炼）、`bge-m3`（本地 vLLM）。
+**嵌入模型**（语义搜索）在端点满足 Profile 声明的 batch、token、输入形式、维度和响应位置对齐约束时使用 OpenAI Embeddings 协议。已验证路由包括 `text-embedding-3-small`、`text-embedding-v4`（百炼）和 `bge-m3`（本地 vLLM）。
 
 > **Anthropic 说明：** Claude 仅用于 **LLM**（设置 `ANTHROPIC_API_KEY`）。Anthropic 没有嵌入接口，请搭配 OpenAI 兼容的嵌入模型使用：
 > ```python

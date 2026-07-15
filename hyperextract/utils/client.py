@@ -101,6 +101,8 @@ class CompatibleEmbeddings(Embeddings):
         max_batch_size: int = 10,
         chunk_size: Optional[int] = None,
         max_retries: int = 2,
+        empty_input_policy: str = "reject",
+        validation_warning_sink: Any | None = None,
         **kwargs: Any,
     ):
         from openai import OpenAI
@@ -134,6 +136,13 @@ class CompatibleEmbeddings(Embeddings):
 
         # Max tokens per request (8191 is the limit for most OpenAI embedders)
         self._max_tokens = kwargs.get("embedding_ctx_length", 8191)
+        if empty_input_policy not in {"reject", "zero_vector"}:
+            raise ValueError(
+                "CompatibleEmbeddings supports empty_input_policy='reject' or "
+                "explicit 'zero_vector'; use OpenAIEmbeddingAdapter for quarantine"
+            )
+        self._empty_input_policy = empty_input_policy
+        self._validation_warning_sink = validation_warning_sink
 
     def _split_texts(self, texts: List[str]) -> List[Tuple[str, int]]:
         """Split texts into chunks that fit within token limits.
@@ -156,6 +165,12 @@ class CompatibleEmbeddings(Embeddings):
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         if not texts:
             return []
+        blank_indices = [index for index, text in enumerate(texts) if not text.strip()]
+        if blank_indices and self._empty_input_policy == "reject":
+            raise ValueError(
+                f"Empty embedding inputs at indices {blank_indices}; pass "
+                "empty_input_policy='zero_vector' only for explicit legacy behavior"
+            )
 
         chunks = self._split_texts(texts)
         if not chunks:
@@ -228,6 +243,14 @@ class CompatibleEmbeddings(Embeddings):
             zero_vector = [0.0] * dim
             for i in missing_indices:
                 all_embeddings[i] = list(zero_vector)
+            warning = {
+                "category": "embedding_zero_vector",
+                "indices": missing_indices,
+                "warning": "zero vectors inserted by explicit compatibility policy",
+            }
+            logger.warning("%s", warning)
+            if self._validation_warning_sink:
+                self._validation_warning_sink(warning)
 
         return all_embeddings  # type: ignore[return-value]
 
@@ -304,10 +327,65 @@ def _parse_client_spec(
     }
 
 
+def _create_profile_chat_model(
+    registry: Any,
+    profile: Any,
+    *,
+    api_key: str,
+    **kwargs: Any,
+) -> BaseChatModel:
+    from hyperextract.providers.gateway import ModelExecutionGateway
+    from hyperextract.providers.langchain import AdapterChatModel
+    from hyperextract.providers.registry import parse_model_reference
+    from hyperextract.providers.scheduling import (
+        PROCESS_CIRCUIT_BREAKERS,
+        PROCESS_SCHEDULERS,
+    )
+
+    capabilities = profile.capabilities
+    max_concurrency = int(
+        kwargs.pop("max_workers", capabilities.recommended_concurrency)
+    )
+    kwargs.pop("max_retries", None)
+    group = profile.llm_rate_limit_group or profile.name
+    scheduler = PROCESS_SCHEDULERS.get(
+        group,
+        max_concurrency=max_concurrency,
+        recommended_concurrency=capabilities.recommended_concurrency,
+        requests_per_minute=capabilities.requests_per_minute,
+        tokens_per_minute=capabilities.tokens_per_minute,
+    )
+    gateway = ModelExecutionGateway(
+        registry.create_generation_adapter(profile.name, api_key=api_key),
+        profile,
+        scheduler=scheduler,
+        circuit_breaker=PROCESS_CIRCUIT_BREAKERS.get(group),
+    )
+    reference = parse_model_reference(profile.llm)
+    return AdapterChatModel(
+        gateway,
+        model_name=reference.model,
+        temperature=kwargs.pop("temperature", None),
+        max_output_tokens=kwargs.pop(
+            "max_output_tokens",
+            kwargs.pop(
+                "max_tokens",
+                profile.max_tokens or capabilities.max_output_tokens,
+            ),
+        ),
+        timeout_seconds=kwargs.pop(
+            "timeout_seconds", kwargs.pop("timeout", profile.request_timeout)
+        ),
+        **kwargs,
+    )
+
+
 def create_llm(
-    spec: str | dict,
+    spec: str | dict | None = None,
     *,
     api_key: str = "",
+    model_profile: str | None = None,
+    profile_path: str | Path | None = None,
     **kwargs: Any,
 ) -> BaseChatModel:
     """Create an LLM client from a specification string or dict.
@@ -325,6 +403,24 @@ def create_llm(
         >>> llm = create_llm("vllm:Qwen3.5-9B@localhost:8000/v1", api_key="dummy")
         >>> llm = create_llm({"provider": "bailian", "model": "qwen-plus", "temperature": 0.5})
     """
+    if spec is None:
+        from hyperextract.providers.registry import (
+            DEFAULT_PROFILE_NAME,
+            ProviderRegistry,
+        )
+
+        registry = ProviderRegistry(Path(profile_path) if profile_path else None)
+        profile = registry.get(model_profile or DEFAULT_PROFILE_NAME)
+        from hyperextract.providers.probe import ensure_probe_eligibility
+
+        ensure_probe_eligibility(profile)
+        api_key = api_key or registry._required_env(profile.llm_api_key_env)
+        return _create_profile_chat_model(
+            registry,
+            profile,
+            api_key=api_key,
+            **kwargs,
+        )
     config = _parse_client_spec(spec, api_key=api_key, default_kind="llm")
     config.update(kwargs)
 
@@ -424,6 +520,8 @@ def create_client(
     *,
     provider: str = "",
     api_key: str = "",
+    model_profile: str | None = None,
+    profile_path: str | Path | None = None,
     **kwargs: Any,
 ) -> Tuple[BaseChatModel, Embeddings]:
     """Create both LLM and Embedder clients in one call.
@@ -459,6 +557,56 @@ def create_client(
         (llm_client, embedder_client) tuple.
     """
     # Pattern A: Single provider shorthand
+    if (
+        llm is None
+        and embedder is None
+        and (model_profile is not None or os.environ.get("OPENAI_MODEL"))
+    ):
+        from hyperextract.providers.registry import (
+            DEFAULT_PROFILE_NAME,
+            ProviderRegistry,
+        )
+
+        registry = ProviderRegistry(Path(profile_path) if profile_path else None)
+        profile = registry.get(model_profile or DEFAULT_PROFILE_NAME)
+        from hyperextract.providers.probe import ensure_probe_eligibility
+
+        ensure_probe_eligibility(profile)
+        if not profile.embedder:
+            raise ValueError(
+                "The selected model profile has no independent embedding route; "
+                "configure EMBEDDING_MODEL/BASE_URL/API_KEY or pass embedder=..."
+            )
+        llm_key = api_key or registry._required_env(profile.llm_api_key_env)
+        embedding_capabilities = profile.embedding_capabilities
+        if embedding_capabilities is None:
+            raise ValueError("The selected model profile has no embedding capabilities")
+        from hyperextract.providers.langchain import AdapterEmbeddings
+        from hyperextract.providers.scheduling import PROCESS_SCHEDULERS
+
+        embedding_scheduler = PROCESS_SCHEDULERS.get(
+            profile.embedder_rate_limit_group or f"{profile.name}:embedding",
+            max_concurrency=embedding_capabilities.recommended_concurrency,
+            recommended_concurrency=embedding_capabilities.recommended_concurrency,
+            requests_per_minute=embedding_capabilities.requests_per_minute,
+            tokens_per_minute=embedding_capabilities.tokens_per_minute,
+        )
+
+        return (
+            _create_profile_chat_model(
+                registry,
+                profile,
+                api_key=llm_key,
+                **kwargs,
+            ),
+            AdapterEmbeddings(
+                registry.create_embedding_adapter(
+                    profile.name,
+                    scheduler=embedding_scheduler,
+                )
+            ),
+        )
+
     if llm is None and embedder is None:
         if not provider:
             raise ValueError(

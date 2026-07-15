@@ -10,7 +10,7 @@ from hyperextract.service.runtime import create_runtime
 def fake_profiles():
     class FakeProfiles:
         def public_descriptor(self, name):
-            if name != "minimax-course-default":
+            if name != "openai-compatible-default":
                 raise KeyError(name)
             return {"name": name, "fingerprint": "b" * 64}
 

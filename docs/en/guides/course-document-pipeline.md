@@ -51,8 +51,8 @@ uv run he parse ./book.hepkg \
 ```
 
 Named routing can configure multiple OpenAI-compatible services in one
-`.env`. For example, with `HYPER_EXTRACT_LLM_PROFILE=MIMIMAX`, Hyper-Extract
-reads `MIMIMAX_MODEL`, `MIMIMAX_API_KEY`, and `MIMIMAX_BASE_URL`. Embeddings
+the deployment Profile TOML. For example, the explicit `minimax-m27` Profile
+references `MINIMAX_API_KEY` and declares its model, base URL, and capabilities. Embeddings
 can independently use `HYPER_EXTRACT_EMBEDDING_PROFILE=EMBEDDING`. For models
 without native JSON Schema support, use
 `HYPER_EXTRACT_STRUCTURED_OUTPUT_MODE=text_json` to avoid extra capability

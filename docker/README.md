@@ -81,13 +81,16 @@ Copy `.env.example` to `.env` and fill in real values:
 ```sh
 cp docker/.env.example docker/.env
 # edit docker/.env — set POSTGRES_PASSWORD and add provider secrets for the Worker:
-#   MIMIMAX_API_KEY=...
+#   MINIMAX_API_KEY=...
 #   EMBEDDING_API_KEY=...
 ```
 
 `docker/.env` is the single operator file. The Worker loads it via
 `env_file: .env` (so it receives the provider keys); the API does **not** load
-it, so it never sees model secrets. The same file supplies the interpolation
+it, so it never sees model secrets. For the environment-derived default Profile,
+Compose passes only the non-secret model names and base URLs to the API; this
+lets the API and Worker compute the same secret-free Profile fingerprint. The
+same file supplies the interpolation
 variables (`POSTGRES_PASSWORD`, `EXCHANGE_VOLUME_NAME`, `API_NETWORK_NAME`,
 `HE_API_PORT`, `PLATFORM`, `HE_IMAGE`, `MODEL_PROFILES_FILE`).
 
@@ -99,6 +102,22 @@ Both the API and the Worker mount the same Model Profile TOML at
 `/run/config/model-profiles.toml`. The API computes the secret-free Profile
 fingerprint; the Worker additionally resolves the named secret env vars at run
 time.
+
+The example Profile starts with `probe_required = false`, so a fresh stack can
+run using its conservative declared capabilities. To require observed provider
+conformance in production, first create evidence in the persistent exchange
+volume:
+
+```sh
+docker compose --env-file docker/.env -f docker/service.compose.yml run --rm \
+  he-worker he model probe --profile minimax-m27 \
+  --file /run/config/model-profiles.toml
+```
+
+The Worker stores probe evidence under `/exchange/probes` via `HE_PROBE_ROOT`.
+After the command succeeds, set `probe_required = true` in the mounted Profile
+file and restart the Worker. Evidence survives container replacement with the
+rest of the exchange volume.
 
 ## Running the stack
 
@@ -146,22 +165,21 @@ container is force-killed. Lease renewal continues while an in-flight call is
 draining, then stops when the Worker exits; another replica can recover the
 run after the final lease expires.
 
-## Scaling Workers
+## Worker count and provider quotas
 
-Workers claim runs from PostgreSQL with `SELECT ... FOR UPDATE SKIP LOCKED` and
-renew leases independently, so replicas share the database and `/exchange`
-without duplicate work:
-
-```sh
-docker compose --env-file docker/.env -f docker/service.compose.yml \
-  up -d --scale he-worker=3
-```
+Run exactly one Worker process until a shared PostgreSQL/Redis rate-limit-group
+coordinator is configured. Database leases prevent duplicate run ownership, but
+they do not coordinate provider concurrency, RPM/TPM pause windows, or circuit
+breaker state. `HE_SERVICE_WORKER_PROCESSES` therefore rejects values other than
+`1`. The running Worker also holds an exclusive `/exchange/.he-worker.lock`, so
+an accidentally scaled second replica exits instead of creating an independent
+quota coordinator; do not use Compose `--scale` for Workers in this release.
 
 Crashed Workers' expired leases are requeued with `resume_from_checkpoint=true`
 up to a bounded recovery count. Every progress, failure, cancellation,
 publication and completion transition verifies the live lease owner under a
 database row lock, so a stale Worker cannot overwrite a replacement Worker.
-Do not set `container_name` on scaled services.
+Do not set `container_name` on the Worker service.
 
 ## Destructive operations — read carefully
 
@@ -206,7 +224,7 @@ The deterministic smoke test never calls a model. Before a real release,
 perform this manual acceptance once against a small package:
 
 1. Inject the Worker's real provider keys into `docker/.env`
-   (`MIMIMAX_API_KEY`, `EMBEDDING_API_KEY`).
+   (`MINIMAX_API_KEY`, `EMBEDDING_API_KEY`).
 2. Publish one small immutable Document Package `1.1` (with a Brief) to
    `/exchange/packages/<name>.hepkg/`.
 3. `POST /v1/document-packages/validate` with `contract_version: "1.1"` and the

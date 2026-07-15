@@ -1,4 +1,9 @@
 from hyperextract.documents import document_package_fingerprint
+from fastapi.testclient import TestClient
+
+from hyperextract.providers.contracts import ProfileConfigurationError
+from hyperextract.service.api.app import create_app
+from hyperextract.service.runtime import create_runtime
 
 
 def request_body(package_path, version="1.0"):
@@ -14,7 +19,7 @@ def request_body(package_path, version="1.0"):
             "name": "course_graph",
             "profile": {"name": "course_knowledge_graph", "version": "1"},
         },
-        "execution": {"model_profile": "minimax-course-default"},
+        "execution": {"model_profile": "openai-compatible-default"},
     }
 
 
@@ -51,6 +56,36 @@ def test_create_rejects_unknown_model_profile_before_queue(client, package_path)
     response = client.post(
         "/v1/runs", headers={"Idempotency-Key": "missing"}, json=payload
     )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "MODEL_PROFILE_INVALID"
+
+
+def test_create_rejects_required_profile_without_probe_before_queue(
+    settings, repository, package_path
+):
+    class ProbeRequiredProfiles:
+        def validate(self, name, *, check_probe=False, **_kwargs):
+            assert check_probe is True
+            raise ProfileConfigurationError(
+                "capability probe required",
+                code="PROBE_REQUIRED",
+            )
+
+        def public_descriptor(self, name):
+            raise AssertionError("descriptor must not be read after probe rejection")
+
+    runtime = create_runtime(
+        settings=settings,
+        repository=repository,
+        model_profiles=ProbeRequiredProfiles(),
+    )
+    with TestClient(create_app(runtime=runtime)) as api_client:
+        response = api_client.post(
+            "/v1/runs",
+            headers={"Idempotency-Key": "probe-required"},
+            json=request_body(package_path),
+        )
+
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "MODEL_PROFILE_INVALID"
 

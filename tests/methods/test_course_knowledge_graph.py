@@ -60,8 +60,32 @@ def test_course_method_compiles_brief_into_stage_system_messages():
     )
 
     assert "Keep section hierarchy" in graph.prompt_snapshots["nodes"]["system"]
-    assert "Prefer explicit dependencies" not in graph.prompt_snapshots["nodes"]["system"]
-    assert "Prefer explicit dependencies" in graph.prompt_snapshots["global_edges"]["system"]
+    assert (
+        "Prefer explicit dependencies" not in graph.prompt_snapshots["nodes"]["system"]
+    )
+    assert (
+        "Prefer explicit dependencies"
+        in graph.prompt_snapshots["global_edges"]["system"]
+    )
     assert "{source_text}" in graph.prompt_snapshots["nodes"]["user"]
     assert "{source_text}" not in graph.prompt_snapshots["nodes"]["system"]
     assert graph.brief_hash == brief.content_hash
+
+
+def test_course_invokers_receive_thread_local_request_lineage():
+    graph = CourseKnowledgeGraph(
+        llm_client=MockChatModel(),
+        embedder=MockEmbeddings(dim=8),
+    )
+    graph.model_profile_fingerprint = "profile-fingerprint"
+    graph.model_fingerprint = "model-fingerprint"
+    invoker = graph.chunk_extractor.steps[-1].func.__self__
+
+    with graph.model_request_context(chunk_id="chunk-1", batch_id="chunk-result"):
+        metadata = invoker.request_metadata
+
+    assert metadata["chunk_id"] == "chunk-1"
+    assert metadata["batch_id"] == "chunk-result"
+    assert metadata["profile_fingerprint"] == "profile-fingerprint"
+    assert metadata["model_fingerprint"] == "model-fingerprint"
+    assert metadata["prompt_fingerprint"] == graph.prompt_hash

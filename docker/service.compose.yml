@@ -43,6 +43,10 @@ services:
       HE_SERVICE_DATABASE_URL: postgresql+psycopg://hyperextract:${POSTGRES_PASSWORD}@postgres/hyperextract
       HE_SERVICE_EXCHANGE_ROOT: /exchange
       HE_SERVICE_MODEL_PROFILES: /run/config/model-profiles.toml
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
     volumes:
       - exchange-data:/exchange
       - ${MODEL_PROFILES_FILE:-./model-profiles.example.toml}:/run/config/model-profiles.toml:ro
@@ -75,6 +79,7 @@ services:
       HE_SERVICE_DATABASE_URL: postgresql+psycopg://hyperextract:${POSTGRES_PASSWORD}@postgres/hyperextract
       HE_SERVICE_EXCHANGE_ROOT: /exchange
       HE_SERVICE_MODEL_PROFILES: /run/config/model-profiles.toml
+      HE_PROBE_ROOT: /exchange/probes
     volumes:
       - exchange-data:/exchange
       - ${MODEL_PROFILES_FILE:-./model-profiles.example.toml}:/run/config/model-profiles.toml:ro

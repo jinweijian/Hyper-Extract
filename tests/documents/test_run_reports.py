@@ -70,3 +70,47 @@ def test_cost_report_calculates_configured_per_million_token_rates():
     assert report["output_cost"] == 0.0018
     assert report["estimated_cost"] == 0.0036
     assert report["currency"] == "CNY"
+
+
+def test_cost_report_prices_embedding_tokens_with_independent_rate():
+    model_usage = usage()
+    model_usage["by_operation"]["embedding"] = {
+        "calls": 2,
+        "successful_calls": 2,
+        "failed_calls": 0,
+        "input_tokens": 400,
+        "output_tokens": 0,
+        "elapsed_seconds": 1.0,
+    }
+
+    report = build_cost_report(
+        model_usage,
+        input_cost_per_million=1.5,
+        output_cost_per_million=6.0,
+        embedding_input_cost_per_million=0.2,
+        currency="CNY",
+    )
+
+    assert report["status"] == "estimated"
+    assert report["generation_input_tokens"] == 800
+    assert report["embedding_input_tokens"] == 400
+    assert report["input_cost"] == 0.0012
+    assert report["embedding_input_cost"] == 0.00008
+    assert report["output_cost"] == 0.0018
+    assert report["estimated_cost"] == 0.00308
+
+
+def test_cost_report_does_not_charge_embedding_at_generation_rate():
+    model_usage = usage()
+    model_usage["by_operation"]["embedding"] = {"input_tokens": 400}
+
+    report = build_cost_report(
+        model_usage,
+        input_cost_per_million=1.5,
+        output_cost_per_million=6.0,
+    )
+
+    assert report["status"] == "partially_priced"
+    assert report["input_cost"] == 0.0012
+    assert report["embedding_input_cost"] is None
+    assert report["estimated_cost"] == 0.003

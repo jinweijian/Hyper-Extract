@@ -3,6 +3,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from hyperextract.providers.contracts import ProfileConfigurationError
+from hyperextract.providers.gateway import GatewayExecutionError
+
 # Patterns that capture provider secrets commonly embedded in error strings:
 #   "Bearer sk-secret-value"
 #   "Authorization: Bearer eyJ..."
@@ -78,6 +81,36 @@ def _categorize(error: BaseException) -> tuple[str, bool]:
     * Anything else is treated as a generic execution failure that is
       resumable, since we cannot prove retrying would not help.
     """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ProfileConfigurationError):
+            return current.code, False
+        if isinstance(current, GatewayExecutionError):
+            category = current.failure.category
+            if category == "authentication":
+                return "MODEL_AUTHENTICATION_FAILED", False
+            if category == "quota.permission":
+                return "MODEL_PERMISSION_DENIED", False
+            if category == "quota.exhausted":
+                return "MODEL_QUOTA_EXHAUSTED", False
+            if category in {
+                "unsupported_capability",
+                "unsupported_parameter",
+                "protocol",
+                "context_window",
+            }:
+                return "MODEL_INVALID_INPUT", False
+            if category == "circuit_open":
+                return "MODEL_TRANSIENT_FAILURE", True
+            if category == "transient" or category.startswith("rate_limit."):
+                if current.decision.action == "fail":
+                    return "MODEL_RETRY_EXHAUSTED", True
+                return "MODEL_TRANSIENT_FAILURE", True
+        original = getattr(current, "original", None)
+        current = original if isinstance(original, BaseException) else current.__cause__
+
     name = type(error).__name__
     message = str(error).lower()
 

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import threading
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,8 @@ from hyperextract.documents.course_pipeline import (
     _global_edge_candidates,
     _normalize_chunk_graph,
     _quality_report,
+    _retry,
+    _run_rejection_summary,
     run_course_document,
 )
 from hyperextract.documents.model_errors import OutputTruncatedError
@@ -26,6 +29,17 @@ from hyperextract.methods.rag.course_knowledge_graph import (
     CourseNode,
 )
 from hyperextract.profiles.course import load_course_profile
+from hyperextract.providers.artifacts import ModelArtifactStore
+from hyperextract.providers.contracts import (
+    CanonicalModelFailure,
+    EmbeddingItemResult,
+    EmbeddingResponse,
+    RejectedItem,
+    RecoveryDecision,
+    ValidationSummary,
+)
+from hyperextract.providers.gateway import GatewayExecutionError
+from hyperextract.providers.profiles import ProfileRecovery
 from tests.documents.test_document_package import _add_extraction_brief, _write_package
 from tests.documents.test_docling import _document
 from tests.mocks import MockEmbeddings
@@ -99,6 +113,165 @@ class FakeCourseGraph:
         (folder_path / "metadata.json").write_text(
             json.dumps(self.metadata), encoding="utf-8"
         )
+
+
+def test_pipeline_does_not_restart_exhausted_gateway_recovery_budget():
+    class Checkpoint:
+        @contextmanager
+        def heartbeat(self, *args, **kwargs):
+            yield
+
+        def emit(self, *args, **kwargs):
+            raise AssertionError("outer retry must not be emitted")
+
+    calls = 0
+    failure = CanonicalModelFailure(
+        request_id="gateway-1",
+        category="transient",
+        reason="retry budget exhausted",
+    )
+    gateway_error = GatewayExecutionError(
+        "exhausted",
+        failure=failure,
+        decision=RecoveryDecision(
+            action="fail",
+            target="request",
+            reason="retry budget exhausted",
+        ),
+    )
+
+    def operation():
+        nonlocal calls
+        calls += 1
+        raise TransientModelError("exhausted", original=gateway_error)
+
+    with pytest.raises(TransientModelError):
+        _retry(
+            operation,
+            checkpoint=Checkpoint(),
+            stage="extract",
+            message="extract",
+            attempts=4,
+            heartbeat_interval=1,
+        )
+
+    assert calls == 1
+
+
+def test_pipeline_retry_uses_profile_recovery_budget():
+    class Checkpoint:
+        @contextmanager
+        def heartbeat(self, *args, **kwargs):
+            yield
+
+        def emit(self, *args, **kwargs):
+            raise AssertionError("zero retry budget must not emit a retry")
+
+    calls = 0
+
+    def operation():
+        nonlocal calls
+        calls += 1
+        raise TransientModelError("temporarily unavailable")
+
+    with pytest.raises(TransientModelError):
+        _retry(
+            operation,
+            checkpoint=Checkpoint(),
+            stage="embedding",
+            message="embed",
+            attempts=99,
+            recovery=ProfileRecovery(
+                transient_retry_attempts=0,
+                base_delay_seconds=0,
+                max_delay_seconds=0,
+            ),
+            heartbeat_interval=1,
+        )
+
+    assert calls == 1
+
+
+def test_embedding_quarantine_is_persisted_and_included_in_run_summary(tmp_path):
+    store = ModelArtifactStore(tmp_path)
+    store.save_embedding_response(
+        EmbeddingResponse(
+            request_id="embedding-1",
+            items=[
+                EmbeddingItemResult(
+                    input_index=0,
+                    vector=[1.0, 0.0],
+                    status="completed",
+                ),
+                EmbeddingItemResult(
+                    input_index=1,
+                    status="quarantined",
+                    error_reason="invalid_input",
+                ),
+            ],
+            validation_warnings=["embedding inputs quarantined at indices [1]"],
+        )
+    )
+
+    summary = _run_rejection_summary(tmp_path)
+
+    assert summary["quarantined"] == 1
+    assert summary["embedding_quarantined"] == 1
+    assert summary["embedding_quality_incomplete"] is True
+    assert summary["graph_connectivity_incomplete"] is False
+
+
+def test_rejection_summary_preserves_lineage_and_measures_connectivity(tmp_path):
+    checkpoint = tmp_path / ".he-run"
+    store = ModelArtifactStore(checkpoint)
+    store.save_rejection(
+        RejectedItem(
+            rejection_id="rejection-1",
+            request_id="request-1",
+            stage="local_edges",
+            chunk_id="chunk-1",
+            batch_id="batch-1",
+            schema_path="items.0",
+            raw_item={"source": "A", "target": "B"},
+            error="invalid relation",
+        )
+    )
+    store.save_validation(
+        ValidationSummary(
+            request_id="request-1",
+            status="completed_with_rejections",
+            rejected_items=1,
+            unknown_endpoints=["items.1.target: missing target"],
+            connectivity_warnings=["validation warning"],
+            graph_connectivity_incomplete=True,
+        )
+    )
+    (tmp_path / "course-graph.json").write_text(
+        json.dumps(
+            {
+                "knowledge_nodes": [
+                    {"id": "ka", "name": "A"},
+                    {"id": "kb", "name": "B"},
+                    {"id": "kc", "name": "C"},
+                ],
+                "semantic_edges": [
+                    {"source_id": "ka", "target_id": "kc"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = _run_rejection_summary(checkpoint)
+
+    assert summary["affected_requests"] == ["request-1"]
+    assert summary["affected_chunks"] == ["chunk-1"]
+    assert summary["affected_batches"] == ["batch-1"]
+    assert summary["unknown_endpoints"] == ["items.1.target: missing target"]
+    assert summary["newly_isolated_nodes"] == ["kb"]
+    assert summary["semantic_connected_components"] == 2
+    assert summary["additional_connected_components"] == 1
+    assert "validation warning" in summary["connectivity_warnings"]
 
 
 class FakeCombinedCourseGraph(FakeCourseGraph):
@@ -176,6 +349,7 @@ def test_course_pipeline_writes_outputs_and_resumes_chunks(tmp_path):
     source.write_text(json.dumps(_document()), encoding="utf-8")
     output = tmp_path / "output"
     graph = FakeCourseGraph()
+    graph.structured_output_mode = "tool"
     options = PipelineOptions(
         target_tokens=100,
         max_tokens=200,
@@ -193,6 +367,8 @@ def test_course_pipeline_writes_outputs_and_resumes_chunks(tmp_path):
     assert first["status"] == "completed"
     assert second["run_id"] == first["run_id"]
     assert graph.extract_calls == calls_after_first_run
+    manifest = json.loads((output / ".he-run" / "run.json").read_text(encoding="utf-8"))
+    assert manifest["config"]["structured_output_mode"] == "tool"
     assert (output / "course-graph.json").exists()
     assert (output / "quality-report.json").exists()
     assert (output / ".he-run" / "events.jsonl").exists()

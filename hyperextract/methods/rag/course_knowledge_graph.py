@@ -6,6 +6,9 @@ import hashlib
 import json
 import os
 import re
+import threading
+from contextlib import contextmanager
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal
 
@@ -19,6 +22,8 @@ from hyperextract.briefs import ExtractionBrief, render_extraction_brief
 from hyperextract.types import AutoGraph
 from hyperextract.documents.structured_output import StructuredOutputInvoker
 from hyperextract.documents.model_usage import ModelUsageTracker
+from hyperextract.providers.artifacts import ModelArtifactStore
+from hyperextract.providers.gateway import ModelExecutionGateway
 from hyperextract.profiles.course import (
     CourseExtractionProfile,
     compile_course_profile,
@@ -164,9 +169,14 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
         profile: CourseExtractionProfile | None = None,
         structured_output_mode: str | None = None,
         output_repair_attempts: int | None = None,
+        validation_retry_attempts: int | None = None,
+        invalid_item_policy: Literal["quarantine", "fail"] = "quarantine",
+        invalid_item_ratio_threshold: float = 0.2,
         extraction_brief: ExtractionBrief | None = None,
+        generation_gateway: ModelExecutionGateway | None = None,
     ) -> None:
         self.profile = profile or _DEFAULT_PROFILE
+        self._model_request_local = threading.local()
         self.extraction_brief = extraction_brief
         self.compiled_profile = compile_course_profile(self.profile)
         self.profile_name = self.profile.name
@@ -177,6 +187,21 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
         self.usage_tracker = ModelUsageTracker()
         self.structured_output_mode = structured_output_mode
         self.output_repair_attempts = output_repair_attempts
+        self.generation_gateway = generation_gateway or getattr(
+            llm_client, "model_execution_gateway", None
+        )
+        self.validation_retry_attempts = (
+            validation_retry_attempts
+            if validation_retry_attempts is not None
+            else (
+                self.generation_gateway.profile.recovery.validation_retry_attempts
+                if self.generation_gateway is not None
+                else 0
+            )
+        )
+        self.invalid_item_policy = invalid_item_policy
+        self.invalid_item_ratio_threshold = invalid_item_ratio_threshold
+        self.model_artifact_store: ModelArtifactStore | None = None
         super().__init__(
             node_schema=CourseNode,
             edge_schema=CourseEdge,
@@ -233,8 +258,14 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
                 self.node_list_schema,
                 mode=output_mode,
                 repair_attempts=repair_attempts,
+                validation_retry_attempts=self.validation_retry_attempts,
+                invalid_item_policy=self.invalid_item_policy,
+                invalid_item_ratio_threshold=self.invalid_item_ratio_threshold,
                 usage_tracker=self.usage_tracker,
                 operation="local_nodes",
+                artifact_store=self.model_artifact_store,
+                gateway=self.generation_gateway,
+                request_metadata=self._model_request_metadata,
             ).as_runnable()
         )
         self.chunk_extractor = (
@@ -244,8 +275,14 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
                 CourseChunkResult,
                 mode=output_mode,
                 repair_attempts=repair_attempts,
+                validation_retry_attempts=self.validation_retry_attempts,
+                invalid_item_policy=self.invalid_item_policy,
+                invalid_item_ratio_threshold=self.invalid_item_ratio_threshold,
                 usage_tracker=self.usage_tracker,
                 operation="local_chunk",
+                artifact_store=self.model_artifact_store,
+                gateway=self.generation_gateway,
+                request_metadata=self._model_request_metadata,
             ).as_runnable()
         )
         self.edge_extractor = (
@@ -255,8 +292,14 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
                 self.edge_list_schema,
                 mode=output_mode,
                 repair_attempts=repair_attempts,
+                validation_retry_attempts=self.validation_retry_attempts,
+                invalid_item_policy=self.invalid_item_policy,
+                invalid_item_ratio_threshold=self.invalid_item_ratio_threshold,
                 usage_tracker=self.usage_tracker,
                 operation="local_edges",
+                artifact_store=self.model_artifact_store,
+                gateway=self.generation_gateway,
+                request_metadata=self._model_request_metadata,
             ).as_runnable()
         )
         self.global_edge_extractor = (
@@ -266,8 +309,14 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
                 CourseEdgeList,
                 mode=output_mode,
                 repair_attempts=repair_attempts,
+                validation_retry_attempts=self.validation_retry_attempts,
+                invalid_item_policy=self.invalid_item_policy,
+                invalid_item_ratio_threshold=self.invalid_item_ratio_threshold,
                 usage_tracker=self.usage_tracker,
                 operation="global_edges",
+                artifact_store=self.model_artifact_store,
+                gateway=self.generation_gateway,
+                request_metadata=self._model_request_metadata,
             ).as_runnable()
         )
         self.dedup_extractor = (
@@ -277,8 +326,14 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
                 DedupDecision,
                 mode=output_mode,
                 repair_attempts=repair_attempts,
+                validation_retry_attempts=self.validation_retry_attempts,
+                invalid_item_policy=self.invalid_item_policy,
+                invalid_item_ratio_threshold=self.invalid_item_ratio_threshold,
                 usage_tracker=self.usage_tracker,
                 operation="dedup",
+                artifact_store=self.model_artifact_store,
+                gateway=self.generation_gateway,
+                request_metadata=self._model_request_metadata,
             ).as_runnable()
         )
         self.community_extractor = (
@@ -288,10 +343,50 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
                 CommunityReport,
                 mode=output_mode,
                 repair_attempts=repair_attempts,
+                validation_retry_attempts=self.validation_retry_attempts,
+                invalid_item_policy=self.invalid_item_policy,
+                invalid_item_ratio_threshold=self.invalid_item_ratio_threshold,
                 usage_tracker=self.usage_tracker,
                 operation="community",
+                artifact_store=self.model_artifact_store,
+                gateway=self.generation_gateway,
+                request_metadata=self._model_request_metadata,
             ).as_runnable()
         )
+
+    def _model_request_metadata(self) -> dict[str, str]:
+        profile_fingerprint = str(
+            getattr(self, "model_profile_fingerprint", "")
+            or (
+                self.generation_gateway.profile.public_fingerprint()
+                if self.generation_gateway is not None
+                else ""
+            )
+        )
+        model_fingerprint = str(getattr(self, "model_fingerprint", ""))
+        if not model_fingerprint and self.generation_gateway is not None:
+            model_fingerprint = hashlib.sha256(
+                self.generation_gateway.profile.llm.encode("utf-8")
+            ).hexdigest()
+        metadata = {
+            "profile_fingerprint": profile_fingerprint,
+            "model_fingerprint": model_fingerprint,
+            "prompt_fingerprint": self.prompt_hash,
+        }
+        metadata.update(getattr(self._model_request_local, "metadata", {}))
+        return {key: value for key, value in metadata.items() if value}
+
+    @contextmanager
+    def model_request_context(self, **metadata: str | None) -> Iterator[None]:
+        previous = getattr(self._model_request_local, "metadata", {})
+        self._model_request_local.metadata = {
+            **previous,
+            **{key: str(value) for key, value in metadata.items() if value is not None},
+        }
+        try:
+            yield
+        finally:
+            self._model_request_local.metadata = previous
 
     def _compile_prompt_messages(self) -> dict[str, dict[str, str]]:
         prompts = {
@@ -347,6 +442,11 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
         self.brief_hash = brief.content_hash if brief else ""
         self._configure_profile_extractors()
 
+    def configure_model_artifacts(self, root: str | Path) -> None:
+        """Route structured-output evidence into the current run checkpoint."""
+        self.model_artifact_store = ModelArtifactStore(root)
+        self._configure_profile_extractors()
+
     def _create_empty_instance(self) -> "CourseKnowledgeGraph":
         return CourseKnowledgeGraph(
             llm_client=self.llm_client,
@@ -358,7 +458,11 @@ class CourseKnowledgeGraph(AutoGraph[CourseNode, CourseEdge]):
             profile=self.profile,
             structured_output_mode=self.structured_output_mode,
             output_repair_attempts=self.output_repair_attempts,
+            validation_retry_attempts=self.validation_retry_attempts,
+            invalid_item_policy=self.invalid_item_policy,
+            invalid_item_ratio_threshold=self.invalid_item_ratio_threshold,
             extraction_brief=self.extraction_brief,
+            generation_gateway=self.generation_gateway,
         )
 
     def extract_nodes(self, source_text: str) -> list[CourseNode]:

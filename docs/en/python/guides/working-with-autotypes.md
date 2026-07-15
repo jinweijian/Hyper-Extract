@@ -65,7 +65,7 @@ class Collaboration(BaseModel):
     year: int = Field(description="Year of collaboration")
 
 # Step 2: Configure LLM clients
-# You can use any OpenAI-compatible endpoint by setting base_url
+# OpenAI-compatible endpoints require a capability Profile; set its base_url here
 # Or use create_client() for simplified configuration
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 embedder = OpenAIEmbeddings(model="text-embedding-3-small")

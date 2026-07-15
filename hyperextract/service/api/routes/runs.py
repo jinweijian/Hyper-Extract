@@ -88,6 +88,14 @@ def resolve_run_command(
     payload["resolved_package_path"] = str(package)
     payload["resolved_package_fingerprint"] = package_fingerprint
     try:
+        validate_profile = getattr(runtime.model_profiles, "validate", None)
+        if callable(validate_profile):
+            validate_profile(
+                request.execution.model_profile,
+                require_secrets=False,
+                require_embedder=True,
+                check_probe=True,
+            )
         model_descriptor = runtime.model_profiles.public_descriptor(
             request.execution.model_profile
         )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 import signal
 import threading
 import time
@@ -14,6 +15,44 @@ from .repository import LeaseOwnershipLost
 from .settings import ServiceSettings
 
 _WORKER_VERSION = "1.0.0"
+
+
+class WorkerSingletonLock:
+    """Cross-process lock stored on the shared Service exchange volume."""
+
+    def __init__(self, exchange_root) -> None:
+        self.path = exchange_root / ".he-worker.lock"
+        self._handle = None
+
+    def __enter__(self) -> WorkerSingletonLock:
+        import fcntl
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            handle.close()
+            raise RuntimeError(
+                "HE_SERVICE_SINGLE_WORKER_REQUIRED: another Worker already holds "
+                f"the exchange lock at {self.path}"
+            ) from error
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"pid={os.getpid()}\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+        self._handle = handle
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        import fcntl
+
+        if self._handle is None:
+            return
+        fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+        self._handle.close()
+        self._handle = None
 
 
 class ServiceWorker:
@@ -237,18 +276,19 @@ def main() -> None:
 
     runtime = create_runtime()
     runtime.prepare()
-    worker = ServiceWorker(
-        runtime.repository,
-        CourseRunExecutor(
-            runtime.settings,
-            runtime.repository,
-            runtime.model_profiles,
-        ),
-        ArtifactPublisher(runtime.settings.run_root),
-        runtime.settings,
-        worker_id="worker-" + uuid.uuid4().hex[:12],
-    )
     try:
-        run_worker_loop(worker, runtime.settings)
+        with WorkerSingletonLock(runtime.settings.exchange_root):
+            worker = ServiceWorker(
+                runtime.repository,
+                CourseRunExecutor(
+                    runtime.settings,
+                    runtime.repository,
+                    runtime.model_profiles,
+                ),
+                ArtifactPublisher(runtime.settings.run_root),
+                runtime.settings,
+                worker_id="worker-" + uuid.uuid4().hex[:12],
+            )
+            run_worker_loop(worker, runtime.settings)
     finally:
         runtime.close()

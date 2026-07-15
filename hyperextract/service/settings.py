@@ -13,6 +13,7 @@ class ServiceSettings:
     heartbeat_seconds: int = 30
     poll_seconds: float = 2.0
     max_worker_recoveries: int = 3
+    worker_processes: int = 1
     model_profiles_path: Path | None = None
 
     @property
@@ -29,6 +30,12 @@ class ServiceSettings:
         if not root.is_absolute():
             raise ValueError("HE_SERVICE_EXCHANGE_ROOT must be absolute")
         profiles = os.environ.get("HE_SERVICE_MODEL_PROFILES")
+        worker_processes = int(os.environ.get("HE_SERVICE_WORKER_PROCESSES", "1"))
+        if worker_processes != 1:
+            raise ValueError(
+                "HE_SERVICE_WORKER_PROCESSES must be 1 until distributed "
+                "rate-limit-group coordination is configured"
+            )
         return cls(
             database_url=os.environ["HE_SERVICE_DATABASE_URL"],
             exchange_root=root,
@@ -38,5 +45,6 @@ class ServiceSettings:
             max_worker_recoveries=int(
                 os.environ.get("HE_SERVICE_MAX_WORKER_RECOVERIES", "3")
             ),
+            worker_processes=worker_processes,
             model_profiles_path=Path(profiles) if profiles else None,
         )
