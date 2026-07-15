@@ -127,24 +127,45 @@ compose() {
         -f "$REPO_ROOT/docker/compose.dev.yml" "$@"
 }
 
+prepare_database() {
+    compose up -d postgres
+    database_ready=0
+    for _ in $(seq 1 60); do
+        if compose exec -T postgres pg_isready -U hyperextract -d hyperextract \
+            >/dev/null 2>&1; then
+            database_ready=1
+            break
+        fi
+        sleep 2
+    done
+    [ "$database_ready" -eq 1 ] || {
+        echo "PostgreSQL did not become ready." >&2
+        return 1
+    }
+    compose run --rm --no-deps he-api alembic upgrade head
+}
+
 COMPOSE_JSON="$(compose config --format json)"
 API_PORT="$(printf '%s' "$COMPOSE_JSON" | jq -r '.services["he-api"].ports[0].published // "8000"')"
-EXCHANGE_VOLUME="$(printf '%s' "$COMPOSE_JSON" | jq -r '.volumes["exchange-data"].name')"
 BASE_URL="http://127.0.0.1:$API_PORT"
 
 if curl -fsS "$BASE_URL/health/ready" >/dev/null 2>&1; then
     echo "[docker] Reusing the healthy local API and Worker"
 elif [ "$FORCE_BUILD" -eq 1 ]; then
     echo "[docker] Rebuilding and starting PostgreSQL, migration, API, and Worker"
-    compose up -d --build
+    compose build he-api
+    prepare_database
+    compose up -d he-api he-worker
 else
     RUNNING_SERVICES="$(compose ps --status running --services 2>/dev/null || true)"
     if printf '%s\n' "$RUNNING_SERVICES" | grep -qx 'he-worker'; then
         echo "[docker] Worker is active; starting only PostgreSQL, migration, and API"
-        compose up -d postgres he-migrate he-api
+        prepare_database
+        compose up -d he-api
     else
         echo "[docker] Starting PostgreSQL, migration, API, and Worker without rebuilding"
-        compose up -d
+        prepare_database
+        compose up -d he-api he-worker
     fi
 fi
 
@@ -160,7 +181,7 @@ done
 if [ "$READY" -ne 1 ]; then
     echo "API did not become ready." >&2
     compose ps >&2
-    compose logs --tail=80 he-api he-migrate he-worker postgres >&2
+    compose logs --tail=80 he-api he-worker postgres >&2
     exit 1
 fi
 rm -f /tmp/he-api-ready-$$.json
@@ -264,7 +285,7 @@ RESUME_COUNT=0
 while :; do
     if ! STATUS_CODE="$(curl -sS -o "$TMP_DIR/status.json" -w '%{http_code}' "$BASE_URL/v1/runs/$RUN_ID")"; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] API temporarily unavailable; restoring API without touching Worker" >&2
-        compose up -d postgres he-migrate he-api >/dev/null 2>&1 || true
+        compose up -d postgres he-api >/dev/null 2>&1 || true
         sleep "$POLL_SECONDS"
         continue
     fi

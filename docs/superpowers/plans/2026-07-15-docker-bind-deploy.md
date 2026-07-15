@@ -29,7 +29,7 @@
 - `docker/.env.example`：删除 named volume 变量，保留部署与模型变量模板。
 - `scripts/deploy.sh`：生产部署唯一推荐入口。
 - `scripts/service-compose-smoke.sh`：临时 bind mount 下的确定性 Compose 冒烟测试。
-- `scripts/service-api-course-test.sh`：本地验收时显式执行迁移；该文件当前未跟踪，只修改本地内容，不加入提交。
+- `scripts/service-api-course-test.sh`：本地验收时显式执行迁移。
 - `docker/README.md`：中文部署、数据维护、备份和故障说明。
 - `tests/docker/test_service_docker_files.py`：Compose、部署脚本、冒烟隔离和文档的静态回归测试。
 
@@ -301,7 +301,7 @@ git commit -m "feat(docker): add one-command deployment"
 
 **Files:**
 - Modify: `scripts/service-compose-smoke.sh`
-- Modify without staging: `scripts/service-api-course-test.sh`
+- Modify: `scripts/service-api-course-test.sh`
 - Modify: `tests/docker/test_service_docker_files.py`
 
 **Interfaces:**
@@ -377,7 +377,7 @@ $COMPOSE up -d he-api he-worker >/dev/null
 
 sentinel 辅助容器改为挂载 `$HE_DATA_ROOT/exchange:/exchange`。
 
-- [ ] **Step 4: 同步修改本地未跟踪验收脚本**
+- [ ] **Step 4: 同步修改本地验收脚本**
 
 在 `scripts/service-api-course-test.sh` 启动栈之前增加：
 
@@ -386,7 +386,7 @@ compose up -d postgres
 compose run --rm --no-deps he-api alembic upgrade head
 ```
 
-该文件保持未跟踪状态，不加入提交。执行 `sh -n scripts/service-api-course-test.sh` 验证语法。
+执行 `sh -n scripts/service-api-course-test.sh` 验证语法。
 
 - [ ] **Step 5: 验证并提交冒烟调整**
 
@@ -403,7 +403,8 @@ Expected: 两个 Shell 语法检查退出码为 0，Docker 测试 PASS。
 Commit:
 
 ```bash
-git add scripts/service-compose-smoke.sh tests/docker/test_service_docker_files.py
+git add scripts/service-compose-smoke.sh scripts/service-api-course-test.sh \
+  tests/docker/test_service_docker_files.py
 git commit -m "test(docker): isolate bind-mount smoke data"
 ```
 
@@ -497,7 +498,7 @@ git check-ignore -v docker/data/postgres docker/data/exchange
 git status --short
 ```
 
-Expected: 第一条命令只允许测试中的否定断言；两个数据目录被 `docker/data/.gitignore` 忽略；原有服务层修改和未跟踪验收脚本仍保留。
+Expected: 第一条命令只允许测试中的否定断言；两个数据目录被 `docker/data/.gitignore` 忽略；原有服务层修改仍保留。
 
 - [ ] **Step 6: 提交文档与最终断言**
 

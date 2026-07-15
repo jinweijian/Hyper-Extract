@@ -239,20 +239,31 @@ def test_deploy_script_reports_failure_diagnostics():
     assert "logs --tail" in text
 
 
-def test_smoke_script_is_isolated_and_cleans_up():
+def test_smoke_script_uses_temporary_bind_mount_and_explicit_migration():
     text = (ROOT / "scripts" / "service-compose-smoke.sh").read_text()
-    assert "set -eu" in text
-    assert "OPENAI_API_KEY=" in text
-    assert "--project-name" in text
-    assert "down --volumes --remove-orphans" in text
-    assert "trap " in text
-    assert "before_worker_id" in text
-    assert "after_worker_id" in text
-    assert 'after_worker_id" != "$before_worker_id' in text
-    assert "docker/compose.yml" in text
-    assert "docker/compose.dev.yml" in text
-    assert "./conf/model-profiles.example.toml" in text
-    assert "service.compose" not in text
+    for required in (
+        "mktemp -d",
+        "HE_DATA_ROOT",
+        "run --rm --no-deps he-api alembic upgrade head",
+        "up -d postgres",
+        "up -d he-api he-worker",
+        "down --remove-orphans",
+        "before_worker_id",
+        "after_worker_id",
+    ):
+        assert required in text
+    assert "EXCHANGE_VOLUME_NAME" not in text
+    assert "he-migrate" not in text
+    assert "down --volumes" not in text
+    assert 'case "$SMOKE_DATA_ROOT"' in text
+
+
+def test_api_acceptance_script_runs_explicit_migration_without_migrate_service():
+    text = (ROOT / "scripts/service-api-course-test.sh").read_text()
+    assert "run --rm --no-deps he-api alembic upgrade head" in text
+    assert "pg_isready" in text
+    assert "he-migrate" not in text
+    assert 'volumes["exchange-data"]' not in text
 
 
 def test_api_uses_readiness_and_worker_has_shutdown_window(compose):
